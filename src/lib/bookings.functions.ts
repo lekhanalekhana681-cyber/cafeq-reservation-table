@@ -40,6 +40,8 @@ const bookingSchema = z.object({
   paymentMethod: z.enum(["pay_on_arrival", "upi_prepay"]).default("pay_on_arrival"),
   paymentStatus: z.enum(["pending_cash", "pending_qr", "paid"]).default("pending_cash"),
   paymentReference: z.string().optional().nullable(),
+  userId: z.string().optional().nullable(),
+  status: z.enum(["confirmed", "cancelled"]).default("confirmed"),
 });
 
 export type BookingInput = z.infer<typeof bookingSchema>;
@@ -153,6 +155,8 @@ export async function createBooking({ data }: { data: BookingInput }) {
       payment_method: validated.paymentMethod,
       payment_status: validated.paymentStatus,
       payment_reference: validated.paymentReference ?? null,
+      user_id: validated.userId ?? null,
+      status: validated.status || "confirmed",
     });
 
     if (error) {
@@ -226,17 +230,71 @@ export async function updateBookingPaymentStatus({
   return { success: true };
 }
 
-export async function getUserBookings(phone: string): Promise<BookingInput[]> {
-  const cleanPhone = phone.trim();
-  if (!cleanPhone) return [];
+export async function cancelBooking({
+  code,
+  userId,
+}: {
+  code: string;
+  userId?: string;
+}): Promise<{ success: boolean; error?: string }> {
+  const supabase = getPublicClient();
+  if (supabase) {
+    let query = supabase.from("bookings").update({ status: "cancelled" }).eq("code", code);
+    if (userId) {
+      query = query.eq("user_id", userId);
+    }
+    const { error } = await query;
+    if (error) {
+      console.error("cancelBooking supabase error:", error);
+    }
+  }
+
+  // Update in local storage
+  try {
+    const existing: BookingInput[] = JSON.parse(localStorage.getItem("cafeq_bookings") || "[]");
+    const updated = existing.map((b) => {
+      if (b.code === code) {
+        return { ...b, status: "cancelled" as const };
+      }
+      return b;
+    });
+    localStorage.setItem("cafeq_bookings", JSON.stringify(updated));
+  } catch (err) {
+    console.error("Failed to cancel in localStorage:", err);
+  }
+
+  return { success: true };
+}
+
+export type UserBookingsQuery =
+  | string
+  | {
+      phone?: string;
+      userId?: string;
+      email?: string;
+    };
+
+export async function getUserBookings(query: UserBookingsQuery): Promise<BookingInput[]> {
+  const queryObj = typeof query === "string" ? { phone: query } : query;
+  const cleanPhone = (queryObj.phone || "").trim();
+  const userId = queryObj.userId;
+  const cleanEmail = (queryObj.email || "").trim().toLowerCase();
+
+  if (!cleanPhone && !userId && !cleanEmail) return [];
 
   const supabase = getPublicClient();
   if (supabase) {
-    const { data, error } = await supabase
-      .from("bookings")
-      .select("*")
-      .eq("phone", cleanPhone)
-      .order("created_at", { ascending: false });
+    let dbQuery = supabase.from("bookings").select("*").order("created_at", { ascending: false });
+
+    if (userId) {
+      dbQuery = dbQuery.eq("user_id", userId);
+    } else if (cleanPhone) {
+      dbQuery = dbQuery.eq("phone", cleanPhone);
+    } else if (cleanEmail) {
+      dbQuery = dbQuery.eq("customer_email", cleanEmail);
+    }
+
+    const { data, error } = await dbQuery;
 
     if (!error && data && data.length > 0) {
       return data.map((d) => ({
@@ -248,7 +306,7 @@ export async function getUserBookings(phone: string): Promise<BookingInput[]> {
         tableType: d.table_type || "window",
         hasPreorder: d.has_preorder || false,
         estimatedPrepTime: d.estimated_prep_time || 0,
-        food_ready_time: d.food_ready_time || null,
+        foodReadyTime: d.food_ready_time || null,
         isPeakHour: d.is_peak_hour || false,
         depositRequired: d.deposit_required || false,
         depositAmount: d.deposit_amount || 0,
@@ -266,6 +324,8 @@ export async function getUserBookings(phone: string): Promise<BookingInput[]> {
         paymentMethod: (d.payment_method as "pay_on_arrival" | "upi_prepay") || "pay_on_arrival",
         paymentStatus: (d.payment_status as "pending_cash" | "pending_qr" | "paid") || "pending_cash",
         paymentReference: d.payment_reference || undefined,
+        userId: d.user_id || undefined,
+        status: (d.status as "confirmed" | "cancelled") || "confirmed",
       }));
     }
   }
@@ -273,7 +333,12 @@ export async function getUserBookings(phone: string): Promise<BookingInput[]> {
   // Fallback to local storage
   try {
     const existing: BookingInput[] = JSON.parse(localStorage.getItem("cafeq_bookings") || "[]");
-    return existing.filter((b) => b.phone.replace(/\D/g, "") === cleanPhone.replace(/\D/g, ""));
+    return existing.filter((b) => {
+      if (userId && b.userId === userId) return true;
+      if (cleanEmail && b.customerEmail?.toLowerCase() === cleanEmail) return true;
+      if (cleanPhone && b.phone.replace(/\D/g, "") === cleanPhone.replace(/\D/g, "")) return true;
+      return false;
+    });
   } catch {
     return [];
   }

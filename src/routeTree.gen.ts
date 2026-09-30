@@ -12,7 +12,9 @@ import { Route as rootRouteImport } from "./routes/__root"
 import { Route as VisitRouteImport } from "./routes/visit"
 import { Route as ReviewsRouteImport } from "./routes/reviews"
 import { Route as ReserveRouteImport } from "./routes/reserve"
+import { Route as RegisterRouteImport } from "./routes/register"
 import { Route as MenuRouteImport } from "./routes/menu"
+import { Route as LoginRouteImport } from "./routes/login"
 import { Route as HistoryRouteImport } from "./routes/history"
 import { Route as GalleryRouteImport } from "./routes/gallery"
 import { Route as EventsRouteImport } from "./routes/events"
@@ -34,9 +36,19 @@ const ReserveRoute = ReserveRouteImport.update({
   path: "/reserve",
   getParentRoute: () => rootRouteImport,
 } as any)
+const RegisterRoute = RegisterRouteImport.update({
+  id: "/register",
+  path: "/register",
+  getParentRoute: () => rootRouteImport,
+} as any)
 const MenuRoute = MenuRouteImport.update({
   id: "/menu",
   path: "/menu",
+  getParentRoute: () => rootRouteImport,
+} as any)
+const LoginRoute = LoginRouteImport.update({
+  id: "/login",
+  path: "/login",
   getParentRoute: () => rootRouteImport,
 } as any)
 const HistoryRoute = HistoryRouteImport.update({
@@ -71,7 +83,9 @@ export interface FileRoutesByFullPath {
   "/events": typeof EventsRoute
   "/gallery": typeof GalleryRoute
   "/history": typeof HistoryRoute
+  "/login": typeof LoginRoute
   "/menu": typeof MenuRoute
+  "/register": typeof RegisterRoute
   "/reserve": typeof ReserveRoute
   "/reviews": typeof ReviewsRoute
   "/visit": typeof VisitRoute
@@ -82,7 +96,9 @@ export interface FileRoutesByTo {
   "/events": typeof EventsRoute
   "/gallery": typeof GalleryRoute
   "/history": typeof HistoryRoute
+  "/login": typeof LoginRoute
   "/menu": typeof MenuRoute
+  "/register": typeof RegisterRoute
   "/reserve": typeof ReserveRoute
   "/reviews": typeof ReviewsRoute
   "/visit": typeof VisitRoute
@@ -94,7 +110,9 @@ export interface FileRoutesById {
   "/events": typeof EventsRoute
   "/gallery": typeof GalleryRoute
   "/history": typeof HistoryRoute
+  "/login": typeof LoginRoute
   "/menu": typeof MenuRoute
+  "/register": typeof RegisterRoute
   "/reserve": typeof ReserveRoute
   "/reviews": typeof ReviewsRoute
   "/visit": typeof VisitRoute
@@ -107,7 +125,9 @@ export interface FileRouteTypes {
     | "/events"
     | "/gallery"
     | "/history"
+    | "/login"
     | "/menu"
+    | "/register"
     | "/reserve"
     | "/reviews"
     | "/visit"
@@ -118,7 +138,9 @@ export interface FileRouteTypes {
     | "/events"
     | "/gallery"
     | "/history"
+    | "/login"
     | "/menu"
+    | "/register"
     | "/reserve"
     | "/reviews"
     | "/visit"
@@ -129,7 +151,9 @@ export interface FileRouteTypes {
     | "/events"
     | "/gallery"
     | "/history"
+    | "/login"
     | "/menu"
+    | "/register"
     | "/reserve"
     | "/reviews"
     | "/visit"
@@ -141,7 +165,9 @@ export interface RootRouteChildren {
   EventsRoute: typeof EventsRoute
   GalleryRoute: typeof GalleryRoute
   HistoryRoute: typeof HistoryRoute
+  LoginRoute: typeof LoginRoute
   MenuRoute: typeof MenuRoute
+  RegisterRoute: typeof RegisterRoute
   ReserveRoute: typeof ReserveRoute
   ReviewsRoute: typeof ReviewsRoute
   VisitRoute: typeof VisitRoute
@@ -170,11 +196,25 @@ declare module "@tanstack/react-router" {
       preLoaderRoute: typeof ReserveRouteImport
       parentRoute: typeof rootRouteImport
     }
+    "/register": {
+      id: "/register"
+      path: "/register"
+      fullPath: "/register"
+      preLoaderRoute: typeof RegisterRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     "/menu": {
       id: "/menu"
       path: "/menu"
       fullPath: "/menu"
       preLoaderRoute: typeof MenuRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    "/login": {
+      id: "/login"
+      path: "/login"
+      fullPath: "/login"
+      preLoaderRoute: typeof LoginRouteImport
       parentRoute: typeof rootRouteImport
     }
     "/history": {
@@ -221,7 +261,9 @@ const rootRouteChildren: RootRouteChildren = {
   EventsRoute: EventsRoute,
   GalleryRoute: GalleryRoute,
   HistoryRoute: HistoryRoute,
+  LoginRoute: LoginRoute,
   MenuRoute: MenuRoute,
+  RegisterRoute: RegisterRoute,
   ReserveRoute: ReserveRoute,
   ReviewsRoute: ReviewsRoute,
   VisitRoute: VisitRoute,

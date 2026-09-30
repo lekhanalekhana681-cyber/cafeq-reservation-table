@@ -1,5 +1,6 @@
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useMemo, useState, useEffect } from "react";
+import { useAuth } from "@/context/AuthContext";
 import {
   Check,
   Minus,
@@ -135,20 +136,39 @@ function ReservePage() {
     upiPayeeName: "The CAFEQ",
   };
   const search = Route.useSearch();
+  const navigate = useNavigate();
+  const { user, isAuthenticated, isLoading: authLoading } = useAuth();
 
   const [date, setDate] = useState(today());
   const [time, setTime] = useState("09:00");
   const [party, setParty] = useState(2);
   const [selectedTableType, setSelectedTableType] = useState<string>("window");
   const [hasPriorBookings, setHasPriorBookings] = useState(false);
-  const [name, setName] = useState("");
-  const [phone, setPhone] = useState(search.phone || "");
-  const [email, setEmail] = useState("");
+  const [name, setName] = useState(user?.name || "");
+  const [phone, setPhone] = useState(search.phone || user?.phone || "");
+  const [email, setEmail] = useState(user?.email || "");
   const [notes, setNotes] = useState("");
   const [dietary, setDietary] = useState<string[]>([]);
   const [occasion, setOccasion] = useState("");
   const [accessibility, setAccessibility] = useState<string[]>([]);
   const [windowPriority, setWindowPriority] = useState(false);
+
+  // Require login to reserve
+  useEffect(() => {
+    if (!authLoading && !isAuthenticated) {
+      toast.info("Please sign in or register to reserve a table.");
+      navigate({ to: "/login", search: { redirect: "/reserve" } });
+    }
+  }, [authLoading, isAuthenticated, navigate]);
+
+  // Pre-fill fields from user profile
+  useEffect(() => {
+    if (user) {
+      if (!name && user.name) setName(user.name);
+      if (!phone && user.phone) setPhone(user.phone);
+      if (!email && user.email) setEmail(user.email);
+    }
+  }, [user]);
 
   // Merged flow toggle
   const [wantFoodOnArrival, setWantFoodOnArrival] = useState(true);
@@ -333,6 +353,8 @@ function ReservePage() {
           total: totalWithDeposit,
           paymentMethod,
           paymentStatus: initialPaymentStatus,
+          userId: user?.id || null,
+          status: "confirmed",
         },
       });
 
