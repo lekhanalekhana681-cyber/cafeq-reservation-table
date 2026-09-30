@@ -41,9 +41,10 @@ const bookingSchema = z.object({
   paymentStatus: z.enum(["pending_cash", "pending_qr", "paid"]).default("pending_cash"),
   paymentReference: z.string().optional().nullable(),
   userId: z.string().optional().nullable(),
-  status: z.enum(["confirmed", "cancelled"]).default("confirmed"),
+  status: z.enum(["confirmed", "cancelled", "completed", "no_show"]).default("confirmed"),
 });
 
+export type BookingStatus = "confirmed" | "cancelled" | "completed" | "no_show";
 export type BookingInput = z.infer<typeof bookingSchema>;
 
 function getPublicClient() {
@@ -343,3 +344,81 @@ export async function getUserBookings(query: UserBookingsQuery): Promise<Booking
     return [];
   }
 }
+
+export async function updateBookingStatus({
+  code,
+  status,
+}: {
+  code: string;
+  status: BookingStatus;
+}): Promise<{ success: boolean; error?: string }> {
+  const supabase = getPublicClient();
+  if (supabase) {
+    const { error } = await supabase.from("bookings").update({ status }).eq("code", code);
+    if (error) {
+      console.error("updateBookingStatus error:", error);
+    }
+  }
+
+  try {
+    const existing: BookingInput[] = JSON.parse(localStorage.getItem("cafeq_bookings") || "[]");
+    const updated = existing.map((b) => (b.code === code ? { ...b, status } : b));
+    localStorage.setItem("cafeq_bookings", JSON.stringify(updated));
+  } catch (err) {
+    console.error("Failed to update status in localStorage:", err);
+  }
+
+  return { success: true };
+}
+
+export async function getAllBookings(): Promise<BookingInput[]> {
+  const supabase = getPublicClient();
+  if (supabase) {
+    const { data, error } = await supabase
+      .from("bookings")
+      .select("*")
+      .order("date", { ascending: false })
+      .order("time", { ascending: false });
+
+    if (!error && data && data.length > 0) {
+      return data.map((d) => ({
+        code: d.code,
+        date: d.date,
+        time: d.time,
+        party: d.party,
+        seating: d.seating,
+        tableType: d.table_type || "window",
+        hasPreorder: d.has_preorder || false,
+        estimatedPrepTime: d.estimated_prep_time || 0,
+        foodReadyTime: d.food_ready_time || null,
+        isPeakHour: d.is_peak_hour || false,
+        depositRequired: d.deposit_required || false,
+        depositAmount: d.deposit_amount || 0,
+        kitchenLoad: (d.kitchen_load as "normal" | "busy" | "high") || "normal",
+        name: d.name,
+        phone: d.phone,
+        customerEmail: d.customer_email || undefined,
+        notes: d.notes || undefined,
+        dietary: d.dietary || [],
+        occasion: d.occasion || undefined,
+        accessibility: d.accessibility || [],
+        windowPriority: d.window_priority || false,
+        items: (d.items as OrderItem[]) || [],
+        total: d.total || 0,
+        paymentMethod: (d.payment_method as "pay_on_arrival" | "upi_prepay") || "pay_on_arrival",
+        paymentStatus: (d.payment_status as "pending_cash" | "pending_qr" | "paid") || "pending_cash",
+        paymentReference: d.payment_reference || undefined,
+        userId: d.user_id || undefined,
+        status: (d.status as BookingStatus) || "confirmed",
+      }));
+    }
+  }
+
+  try {
+    const existing: BookingInput[] = JSON.parse(localStorage.getItem("cafeq_bookings") || "[]");
+    return [...existing].reverse();
+  } catch {
+    return [];
+  }
+}
+
