@@ -1,6 +1,6 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useState, useEffect } from "react";
-import { ShieldCheck, Eye, EyeOff, Lock, Mail, ArrowLeft, AlertCircle } from "lucide-react";
+import { ShieldCheck, Eye, EyeOff, Lock, UserCheck, ArrowLeft, AlertCircle } from "lucide-react";
 import { toast } from "sonner";
 import { loginAdmin, getCurrentAdmin, seedDefaultAdmin } from "@/lib/auth";
 import { Button } from "@/components/ui/button";
@@ -19,7 +19,7 @@ function AdminLoginPage() {
   const search = Route.useSearch();
   const redirectTarget = search.redirect || "/admin";
 
-  const [email, setEmail] = useState("");
+  const [identifier, setIdentifier] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -38,8 +38,8 @@ function AdminLoginPage() {
     e.preventDefault();
     setErrorMessage(null);
 
-    if (!email.trim()) {
-      setErrorMessage("Please enter your administrator email.");
+    if (!identifier.trim()) {
+      setErrorMessage("Please enter your administrator username or email.");
       return;
     }
     if (!password) {
@@ -49,7 +49,7 @@ function AdminLoginPage() {
 
     setLoading(true);
     try {
-      const res = await loginAdmin({ email, password });
+      const res = await loginAdmin({ identifier, password });
       if (res.success && res.user) {
         toast.success(`Welcome to Management Console, ${res.user.name}`);
         navigate({ to: redirectTarget });
@@ -114,24 +114,27 @@ function AdminLoginPage() {
         <form onSubmit={handleSubmit} className="mt-6 space-y-4">
           <div>
             <Label
-              htmlFor="admin-email"
+              htmlFor="admin-identifier"
               className="text-xs font-semibold uppercase tracking-wider text-neutral-400"
             >
-              Admin Email
+              Admin Username or Email
             </Label>
             <div className="relative mt-1.5">
               <Input
-                id="admin-email"
-                type="email"
+                id="admin-identifier"
+                type="text"
                 required
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="admin@cafeq.com"
+                value={identifier}
+                onChange={(e) => setIdentifier(e.target.value)}
+                placeholder="CafeQ or admin@cafeq.com"
                 className="bg-neutral-950/80 border-neutral-800 text-neutral-100 placeholder:text-neutral-600 focus:border-amber-500 pl-10 h-11"
-                autoComplete="email"
+                autoComplete="username"
               />
-              <Mail className="absolute left-3.5 top-1/2 -translate-y-1/2 size-4 text-neutral-500" />
+              <UserCheck className="absolute left-3.5 top-1/2 -translate-y-1/2 size-4 text-neutral-500" />
             </div>
+            <p className="mt-1.5 text-[11px] text-neutral-500">
+              Dev Admin: <span className="font-mono text-amber-400">CafeQ</span> / <span className="font-mono text-amber-400">Cafe@123</span>
+            </p>
           </div>
 
           <div>
@@ -174,6 +177,14 @@ function AdminLoginPage() {
             </Button>
           </div>
         </form>
+
+        {/* Register admin link */}
+        <div className="mt-5 text-center text-xs text-neutral-400">
+          New restaurant manager or staff?{" "}
+          <Link to="/admin/register" className="font-semibold text-amber-500 hover:underline">
+            Register Admin Account
+          </Link>
+        </div>
 
         {/* Security notice */}
         <div className="mt-6 pt-5 border-t border-neutral-800/80 text-center">

@@ -24,6 +24,18 @@ function loadEnv() {
 
 loadEnv();
 
+// -----------------------------------------------------------------------------
+// ⚠️ SECURITY WARNING:
+// The default credentials (CafeQ / Cafe@123) are intended for local development ONLY.
+// In production, configure ADMIN_USERNAME and a strong ADMIN_PASSWORD in your environment.
+// -----------------------------------------------------------------------------
+
+const username = (
+  process.env.ADMIN_USERNAME ||
+  process.env.VITE_ADMIN_USERNAME ||
+  "CafeQ"
+).trim();
+
 const email = (
   process.env.ADMIN_EMAIL ||
   process.env.VITE_ADMIN_EMAIL ||
@@ -33,7 +45,7 @@ const email = (
 const password = (
   process.env.ADMIN_PASSWORD ||
   process.env.VITE_ADMIN_PASSWORD ||
-  "CafeQAdmin2026!"
+  "Cafe@123"
 ).trim();
 
 const name = (
@@ -48,22 +60,25 @@ const phone = (
   "+91 90000 00001"
 ).trim();
 
-console.log("-----------------------------------------");
+console.log("=========================================");
 console.log("CafeQ Administrator Seeding Script");
-console.log("-----------------------------------------");
-console.log(`Reading configuration from environment / .env:`);
+console.log("=========================================");
+console.log(`Reading credentials from environment (.env):`);
+console.log(`- Username:       ${username}`);
+console.log(`- Email:          ${email}`);
+console.log(`- Password:       [PROTECTED (${password.length} chars)]`);
 console.log(`- Admin Name:     ${name}`);
-console.log(`- Admin Email:    ${email}`);
-console.log(`- Admin Password: [PROTECTED (${password.length} chars)]`);
-console.log(`- Admin Phone:    ${phone}`);
+console.log(`- Role:           admin`);
 
-// Generate hash
+// Generate bcrypt hash
 const salt = bcrypt.genSaltSync(10);
 const passwordHash = bcrypt.hashSync(password, salt);
 
+// 1. Prepare/Update Local Storage JSON seed fallback
 const adminUser = {
-  id: `admin_${Date.now()}`,
+  id: "admin_master_001",
   name,
+  username,
   email,
   phone,
   role: "admin",
@@ -71,14 +86,16 @@ const adminUser = {
   password_hash: passwordHash,
 };
 
-// Also save to a seeds/admin-seed.json or local fallback
 const seedsDir = path.resolve(process.cwd(), "supabase");
 if (!fs.existsSync(seedsDir)) {
   fs.mkdirSync(seedsDir, { recursive: true });
 }
 
-// Generate SQL insert seed file for database migration/seeding
-const sqlContent = `-- Auto-generated admin seed SQL
+// 2. Generate idempotent Supabase SQL seed (UPSERT on email)
+const sqlContent = `-- Idempotent admin seed SQL
+-- ⚠️ SECURITY WARNING: Default credentials (CafeQ / Cafe@123) are for local development only.
+-- Change before deploying to production!
+
 INSERT INTO users (id, name, email, phone, password_hash, role, created_at, updated_at)
 VALUES (
   '${adminUser.id}',
@@ -91,6 +108,7 @@ VALUES (
   NOW()
 )
 ON CONFLICT (email) DO UPDATE SET
+  name = EXCLUDED.name,
   password_hash = EXCLUDED.password_hash,
   role = 'admin',
   updated_at = NOW();
@@ -98,9 +116,11 @@ ON CONFLICT (email) DO UPDATE SET
 
 fs.writeFileSync(path.resolve(seedsDir, "seed_admin.sql"), sqlContent, "utf-8");
 
-console.log(`✓ Generated Supabase SQL seed at: supabase/seed_admin.sql`);
-console.log(`✓ Admin user successfully prepared with bcrypt hash.`);
-console.log(`\nYou can now log in at: http://localhost:3000/admin/login`);
-console.log(`Email:    ${email}`);
-console.log(`Password: ${password}`);
-console.log("-----------------------------------------");
+console.log(`✓ Idempotent seed written to: supabase/seed_admin.sql`);
+console.log(`✓ Admin password successfully encrypted using bcrypt.`);
+console.log(`\nReady! You can log in using either Username or Email:`);
+console.log(`  Portal URL: http://localhost:3000/admin/login`);
+console.log(`  Username:   ${username}`);
+console.log(`  Email:      ${email}`);
+console.log(`  Password:   ${password}`);
+console.log("=========================================");

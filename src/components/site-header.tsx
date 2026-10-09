@@ -1,5 +1,5 @@
 import { Link, useNavigate } from "@tanstack/react-router";
-import { Coffee, LogOut, User as UserIcon, Menu as MenuIcon, X, CalendarCheck } from "lucide-react";
+import { Coffee, LogOut, User as UserIcon, Menu as MenuIcon, X, CalendarCheck, ShieldCheck } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { useAuth } from "@/context/AuthContext";
@@ -66,9 +66,19 @@ export function SiteHeader() {
         </nav>
 
         {/* Desktop Auth Controls */}
-        <div className="hidden md:flex items-center gap-3">
+        <div className="hidden md:flex items-center gap-2.5">
           {isAuthenticated && user ? (
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2.5">
+              {/* If logged in user is admin, show shortcut to admin dashboard */}
+              {user.role === "admin" && (
+                <Button asChild size="sm" variant="outline" className="text-xs border-amber-600/40 text-amber-700 dark:text-amber-400 bg-amber-500/10 hover:bg-amber-500/20">
+                  <Link to="/admin" className="flex items-center gap-1.5">
+                    <ShieldCheck className="size-3.5 text-amber-600 dark:text-amber-400" />
+                    <span>Admin Dashboard</span>
+                  </Link>
+                </Button>
+              )}
+
               {/* User greeting */}
               <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-secondary/70 border border-border/60 text-xs font-medium text-foreground">
                 <div className="size-5 rounded-full bg-accent/20 text-accent flex items-center justify-center">
@@ -95,6 +105,19 @@ export function SiteHeader() {
               </Button>
               <Button asChild size="sm" className="text-xs font-semibold shadow-sm">
                 <Link to="/register">Register</Link>
+              </Button>
+
+              {/* Separate Option for Admin Login */}
+              <Button
+                asChild
+                variant="outline"
+                size="sm"
+                className="text-xs border-amber-600/40 text-amber-700 dark:text-amber-400 bg-amber-500/10 hover:bg-amber-500/20 hover:text-amber-800 dark:hover:text-amber-300 font-medium"
+              >
+                <Link to="/admin/login" className="flex items-center gap-1.5">
+                  <ShieldCheck className="size-3.5 text-amber-600 dark:text-amber-400" />
+                  <span>Admin Login</span>
+                </Link>
               </Button>
             </div>
           )}

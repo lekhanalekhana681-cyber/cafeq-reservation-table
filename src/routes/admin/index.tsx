@@ -16,9 +16,16 @@ import {
   RefreshCw,
   ExternalLink,
   ChevronDown,
+  KeyRound,
+  ShieldAlert,
+  Eye,
+  EyeOff,
+  Lock,
+  X,
+  AlertCircle,
 } from "lucide-react";
 import { toast } from "sonner";
-import { getCurrentAdmin, logoutAdmin, type User } from "@/lib/auth";
+import { getCurrentAdmin, logoutAdmin, changeAdminPassword, type User } from "@/lib/auth";
 import {
   getAllBookings,
   updateBookingStatus,
@@ -28,6 +35,7 @@ import {
 import { tableTypes } from "@/data/menu";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 
 export const Route = createFileRoute("/admin/")({
@@ -40,6 +48,17 @@ function AdminDashboardPage() {
   const [loading, setLoading] = useState(true);
   const [bookings, setBookings] = useState<BookingInput[]>([]);
   const [refreshing, setRefreshing] = useState(false);
+
+  // Change password modal state
+  const [showPasswordModal, setShowPasswordModal] = useState(false);
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [showCurrentPassword, setShowCurrentPassword] = useState(false);
+  const [showNewPassword, setShowNewPassword] = useState(false);
+  const [changingPassword, setChangingPassword] = useState(false);
+  const [passwordError, setPasswordError] = useState<string | null>(null);
+  const [passwordSuccess, setPasswordSuccess] = useState<string | null>(null);
 
   // Filters
   const [searchQuery, setSearchQuery] = useState("");
@@ -78,6 +97,53 @@ function AdminDashboardPage() {
     logoutAdmin();
     toast.success("Admin session terminated.");
     navigate({ to: "/admin/login" });
+  };
+
+  const handleChangePassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setPasswordError(null);
+    setPasswordSuccess(null);
+
+    if (!currentPassword) {
+      setPasswordError("Please enter your current administrator password.");
+      return;
+    }
+    if (!newPassword || newPassword.length < 6) {
+      setPasswordError("New password must be at least 6 characters long.");
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setPasswordError("New passwords do not match. Please verify.");
+      return;
+    }
+
+    setChangingPassword(true);
+    try {
+      const res = await changeAdminPassword({
+        adminId: admin?.id,
+        currentPassword,
+        newPassword,
+      });
+
+      if (res.success) {
+        setPasswordSuccess("Administrator password updated successfully!");
+        toast.success("Admin password successfully updated.");
+        setCurrentPassword("");
+        setNewPassword("");
+        setConfirmPassword("");
+        setTimeout(() => {
+          setShowPasswordModal(false);
+          setPasswordSuccess(null);
+        }, 1200);
+      } else {
+        setPasswordError(res.error || "Failed to update password.");
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Error updating password.";
+      setPasswordError(msg);
+    } finally {
+      setChangingPassword(false);
+    }
   };
 
   const handleUpdateStatus = async (code: string, newStatus: BookingStatus) => {
@@ -185,6 +251,19 @@ function AdminDashboardPage() {
 
           <div className="flex items-center gap-2.5">
             <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                setPasswordError(null);
+                setPasswordSuccess(null);
+                setShowPasswordModal(true);
+              }}
+              className="text-xs bg-neutral-900 border-amber-500/30 text-amber-400 hover:text-amber-300 hover:bg-neutral-800"
+            >
+              <KeyRound className="size-3.5 mr-1.5 text-amber-400" /> Change Password
+            </Button>
+
+            <Button
               asChild
               variant="outline"
               size="sm"
@@ -209,6 +288,34 @@ function AdminDashboardPage() {
 
       {/* Main Admin Content */}
       <main className="mx-auto max-w-7xl px-4 sm:px-8 py-8 space-y-8">
+        {/* Production Deployment Security Banner */}
+        <div className="rounded-2xl border border-amber-500/30 bg-amber-950/20 p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="flex items-start gap-3.5">
+            <div className="size-9 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400 shrink-0 mt-0.5 shadow-inner">
+              <ShieldAlert className="size-5" />
+            </div>
+            <div>
+              <h4 className="text-sm font-semibold text-amber-200">
+                Security Notice: Default Administrator Password Active
+              </h4>
+              <p className="mt-0.5 text-xs text-neutral-300 leading-relaxed">
+                The master administrator account is seeded with default dev credentials (<span className="font-mono text-amber-400">CafeQ</span> / <span className="font-mono text-amber-400">Cafe@123</span>).
+                <strong className="text-amber-200"> This password must be changed before deploying to production.</strong>
+              </p>
+            </div>
+          </div>
+          <Button
+            size="sm"
+            onClick={() => {
+              setPasswordError(null);
+              setPasswordSuccess(null);
+              setShowPasswordModal(true);
+            }}
+            className="shrink-0 bg-amber-600 hover:bg-amber-500 text-neutral-950 font-bold text-xs shadow-md shadow-amber-950/50"
+          >
+            <KeyRound className="size-3.5 mr-1.5" /> Update Password
+          </Button>
+        </div>
         {/* KPI Metric Cards */}
         <section className="grid grid-cols-2 lg:grid-cols-5 gap-3.5 sm:gap-4">
           <div className="rounded-2xl border border-neutral-800 bg-neutral-900/60 p-4 shadow-sm">
@@ -516,6 +623,150 @@ function AdminDashboardPage() {
           )}
         </section>
       </main>
+
+      {/* Change Password Dialog Modal */}
+      {showPasswordModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="w-full max-w-md bg-neutral-900 border border-neutral-800 rounded-3xl p-6 sm:p-7 shadow-2xl relative">
+            {/* Close Button */}
+            <button
+              type="button"
+              onClick={() => {
+                setShowPasswordModal(false);
+                setPasswordError(null);
+                setPasswordSuccess(null);
+              }}
+              className="absolute right-5 top-5 text-neutral-400 hover:text-neutral-100 transition-colors p-1 rounded-lg hover:bg-neutral-800"
+              aria-label="Close modal"
+            >
+              <X className="size-5" />
+            </button>
+
+            {/* Modal Header */}
+            <div className="flex items-center gap-3 mb-5">
+              <div className="size-11 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-500 shadow-inner">
+                <KeyRound className="size-5" />
+              </div>
+              <div>
+                <h3 className="text-lg font-bold text-neutral-100 font-display">
+                  Change Master Password
+                </h3>
+                <p className="text-xs text-neutral-400">
+                  Update credentials for administrator <span className="text-amber-400 font-medium">{admin?.name}</span>
+                </p>
+              </div>
+            </div>
+
+            {/* Feedback alerts */}
+            {passwordError && (
+              <div className="mb-4 rounded-xl border border-red-500/30 bg-red-950/40 p-3 text-xs text-red-300 flex items-start gap-2">
+                <AlertCircle className="size-4 text-red-400 shrink-0 mt-0.5" />
+                <span>{passwordError}</span>
+              </div>
+            )}
+            {passwordSuccess && (
+              <div className="mb-4 rounded-xl border border-emerald-500/30 bg-emerald-950/40 p-3 text-xs text-emerald-300 flex items-start gap-2">
+                <CheckCircle2 className="size-4 text-emerald-400 shrink-0 mt-0.5" />
+                <span>{passwordSuccess}</span>
+              </div>
+            )}
+
+            <form onSubmit={handleChangePassword} className="space-y-4">
+              <div>
+                <Label htmlFor="current-pw" className="text-xs font-semibold text-neutral-300">
+                  Current Password
+                </Label>
+                <div className="relative mt-1.5">
+                  <Input
+                    id="current-pw"
+                    type={showCurrentPassword ? "text" : "password"}
+                    value={currentPassword}
+                    onChange={(e) => setCurrentPassword(e.target.value)}
+                    placeholder="Enter current password (e.g. Cafe@123)"
+                    className="bg-neutral-950 border-neutral-800 text-neutral-100 placeholder:text-neutral-600 focus:border-amber-500 pl-9 pr-10 h-10 text-sm"
+                    autoComplete="current-password"
+                  />
+                  <Lock className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-neutral-500" />
+                  <button
+                    type="button"
+                    onClick={() => setShowCurrentPassword(!showCurrentPassword)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-neutral-500 hover:text-neutral-300"
+                    tabIndex={-1}
+                  >
+                    {showCurrentPassword ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <Label htmlFor="new-pw" className="text-xs font-semibold text-neutral-300">
+                  New Password
+                </Label>
+                <div className="relative mt-1.5">
+                  <Input
+                    id="new-pw"
+                    type={showNewPassword ? "text" : "password"}
+                    value={newPassword}
+                    onChange={(e) => setNewPassword(e.target.value)}
+                    placeholder="Min. 6 characters"
+                    className="bg-neutral-950 border-neutral-800 text-neutral-100 placeholder:text-neutral-600 focus:border-amber-500 pl-9 pr-10 h-10 text-sm"
+                    autoComplete="new-password"
+                  />
+                  <Lock className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-neutral-500" />
+                  <button
+                    type="button"
+                    onClick={() => setShowNewPassword(!showNewPassword)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-neutral-500 hover:text-neutral-300"
+                    tabIndex={-1}
+                  >
+                    {showNewPassword ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <Label htmlFor="confirm-pw" className="text-xs font-semibold text-neutral-300">
+                  Confirm New Password
+                </Label>
+                <div className="relative mt-1.5">
+                  <Input
+                    id="confirm-pw"
+                    type="password"
+                    value={confirmPassword}
+                    onChange={(e) => setConfirmPassword(e.target.value)}
+                    placeholder="Repeat new password"
+                    className="bg-neutral-950 border-neutral-800 text-neutral-100 placeholder:text-neutral-600 focus:border-amber-500 pl-9 h-10 text-sm"
+                    autoComplete="new-password"
+                  />
+                  <Lock className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-neutral-500" />
+                </div>
+              </div>
+
+              <div className="pt-2 flex items-center justify-end gap-2.5">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  onClick={() => {
+                    setShowPasswordModal(false);
+                    setPasswordError(null);
+                    setPasswordSuccess(null);
+                  }}
+                  className="text-neutral-400 hover:text-white text-xs"
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="submit"
+                  disabled={changingPassword}
+                  className="bg-amber-600 hover:bg-amber-500 text-neutral-950 font-bold px-5 text-xs shadow-md shadow-amber-950/40"
+                >
+                  {changingPassword ? "Updating…" : "Save Password"}
+                </Button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

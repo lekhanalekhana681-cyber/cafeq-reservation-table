@@ -21,6 +21,7 @@ import { Route as EventsRouteImport } from "./routes/events"
 import { Route as AboutRouteImport } from "./routes/about"
 import { Route as IndexRouteImport } from "./routes/index"
 import { Route as AdminIndexRouteImport } from "./routes/admin/index"
+import { Route as AdminRegisterRouteImport } from "./routes/admin/register"
 import { Route as AdminLoginRouteImport } from "./routes/admin/login"
 
 const VisitRoute = VisitRouteImport.update({
@@ -83,6 +84,11 @@ const AdminIndexRoute = AdminIndexRouteImport.update({
   path: "/admin/",
   getParentRoute: () => rootRouteImport,
 } as any)
+const AdminRegisterRoute = AdminRegisterRouteImport.update({
+  id: "/admin/register",
+  path: "/admin/register",
+  getParentRoute: () => rootRouteImport,
+} as any)
 const AdminLoginRoute = AdminLoginRouteImport.update({
   id: "/admin/login",
   path: "/admin/login",
@@ -102,6 +108,7 @@ export interface FileRoutesByFullPath {
   "/reviews": typeof ReviewsRoute
   "/visit": typeof VisitRoute
   "/admin/login": typeof AdminLoginRoute
+  "/admin/register": typeof AdminRegisterRoute
   "/admin/": typeof AdminIndexRoute
 }
 export interface FileRoutesByTo {
@@ -117,6 +124,7 @@ export interface FileRoutesByTo {
   "/reviews": typeof ReviewsRoute
   "/visit": typeof VisitRoute
   "/admin/login": typeof AdminLoginRoute
+  "/admin/register": typeof AdminRegisterRoute
   "/admin": typeof AdminIndexRoute
 }
 export interface FileRoutesById {
@@ -133,6 +141,7 @@ export interface FileRoutesById {
   "/reviews": typeof ReviewsRoute
   "/visit": typeof VisitRoute
   "/admin/login": typeof AdminLoginRoute
+  "/admin/register": typeof AdminRegisterRoute
   "/admin/": typeof AdminIndexRoute
 }
 export interface FileRouteTypes {
@@ -150,6 +159,7 @@ export interface FileRouteTypes {
     | "/reviews"
     | "/visit"
     | "/admin/login"
+    | "/admin/register"
     | "/admin/"
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -165,6 +175,7 @@ export interface FileRouteTypes {
     | "/reviews"
     | "/visit"
     | "/admin/login"
+    | "/admin/register"
     | "/admin"
   id:
     | "__root__"
@@ -180,6 +191,7 @@ export interface FileRouteTypes {
     | "/reviews"
     | "/visit"
     | "/admin/login"
+    | "/admin/register"
     | "/admin/"
   fileRoutesById: FileRoutesById
 }
@@ -196,6 +208,7 @@ export interface RootRouteChildren {
   ReviewsRoute: typeof ReviewsRoute
   VisitRoute: typeof VisitRoute
   AdminLoginRoute: typeof AdminLoginRoute
+  AdminRegisterRoute: typeof AdminRegisterRoute
   AdminIndexRoute: typeof AdminIndexRoute
 }
 
@@ -285,6 +298,13 @@ declare module "@tanstack/react-router" {
       preLoaderRoute: typeof AdminIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    "/admin/register": {
+      id: "/admin/register"
+      path: "/admin/register"
+      fullPath: "/admin/register"
+      preLoaderRoute: typeof AdminRegisterRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     "/admin/login": {
       id: "/admin/login"
       path: "/admin/login"
@@ -308,6 +328,7 @@ const rootRouteChildren: RootRouteChildren = {
   ReviewsRoute: ReviewsRoute,
   VisitRoute: VisitRoute,
   AdminLoginRoute: AdminLoginRoute,
+  AdminRegisterRoute: AdminRegisterRoute,
   AdminIndexRoute: AdminIndexRoute,
 }
 export const routeTree = rootRouteImport

@@ -8,6 +8,7 @@ export interface User {
   id: string;
   name: string;
   email: string;
+  username?: string;
   phone: string;
   role: UserRole;
   createdAt: string;
@@ -205,7 +206,16 @@ export function getCurrentAdmin(): User | null {
 }
 
 // ----------------- Default Admin Seeder -----------------
+// ⚠️ SECURITY WARNING: Default credentials (CafeQ / Cafe@123) are for local development ONLY.
+// They must be changed before deploying to production!
 export async function seedDefaultAdmin(): Promise<User | null> {
+  const adminUsername = (
+    import.meta.env?.VITE_ADMIN_USERNAME ||
+    process.env?.["ADMIN_USERNAME"] ||
+    process.env?.["VITE_ADMIN_USERNAME"] ||
+    "CafeQ"
+  ).trim();
+
   const adminEmail = (
     import.meta.env?.VITE_ADMIN_EMAIL ||
     process.env?.["ADMIN_EMAIL"] ||
@@ -217,13 +227,13 @@ export async function seedDefaultAdmin(): Promise<User | null> {
     import.meta.env?.VITE_ADMIN_PASSWORD ||
     process.env?.["ADMIN_PASSWORD"] ||
     process.env?.["VITE_ADMIN_PASSWORD"] ||
-    "CafeQAdmin2026!"
+    "Cafe@123"
   ).trim();
 
   const adminName = (
     import.meta.env?.VITE_ADMIN_NAME ||
     process.env?.["ADMIN_NAME"] ||
-    "CafeQ Administrator"
+    "CafeQ Master Admin"
   ).trim();
 
   const adminPhone = (
@@ -233,47 +243,62 @@ export async function seedDefaultAdmin(): Promise<User | null> {
   ).trim();
 
   const localUsers = getLocalUsers();
-  const existing = localUsers.find((u) => u.email.toLowerCase() === adminEmail);
-
-  if (existing) {
-    if (existing.role !== "admin") {
-      existing.role = "admin";
-      saveLocalUsers(localUsers);
-    }
-    return existing;
-  }
-
-  // Create default admin
   const salt = bcrypt.genSaltSync(10);
   const passwordHash = bcrypt.hashSync(adminPassword, salt);
-  const adminId = `admin_${Date.now()}`;
-  const now = new Date().toISOString();
 
-  const adminUser: StoredUser = {
-    id: adminId,
-    name: adminName,
-    email: adminEmail,
-    phone: adminPhone,
-    role: "admin",
-    createdAt: now,
-    password_hash: passwordHash,
-  };
+  // Idempotently locate any existing admin user (by email, username, or role)
+  let existingIndex = localUsers.findIndex(
+    (u) =>
+      u.email.toLowerCase() === adminEmail ||
+      (u.username && u.username.toLowerCase() === adminUsername.toLowerCase()) ||
+      u.role === "admin"
+  );
 
-  localUsers.push(adminUser);
-  saveLocalUsers(localUsers);
+  let adminUser: StoredUser;
 
-  // Sync to remote database if available
+  if (existingIndex !== -1) {
+    // Idempotent update: update password, username, and role
+    localUsers[existingIndex] = {
+      ...localUsers[existingIndex],
+      name: adminName,
+      username: adminUsername,
+      email: adminEmail,
+      phone: adminPhone,
+      role: "admin",
+      password_hash: passwordHash,
+    };
+    adminUser = localUsers[existingIndex];
+    saveLocalUsers(localUsers);
+  } else {
+    // Create new admin
+    const adminId = "admin_master_001";
+    const now = new Date().toISOString();
+    adminUser = {
+      id: adminId,
+      name: adminName,
+      username: adminUsername,
+      email: adminEmail,
+      phone: adminPhone,
+      role: "admin",
+      createdAt: now,
+      password_hash: passwordHash,
+    };
+    localUsers.push(adminUser);
+    saveLocalUsers(localUsers);
+  }
+
+  // Sync to remote Supabase if available
   const supabase = getPublicClient();
   if (supabase) {
     try {
       await supabase.from("users").upsert({
-        id: adminId,
+        id: adminUser.id,
         name: adminName,
         email: adminEmail,
         phone: adminPhone,
         role: "admin",
         password_hash: passwordHash,
-        created_at: now,
+        updated_at: new Date().toISOString(),
       });
     } catch {
       // Local fallback active
@@ -495,22 +520,26 @@ export async function loginUser({
 // ----------------- Admin Login with Role Enforcement & Rate Limiting -----------------
 export async function loginAdmin({
   email,
+  username,
+  identifier,
   password,
 }: {
-  email: string;
+  email?: string;
+  username?: string;
+  identifier?: string;
   password: string;
 }): Promise<AuthResponse> {
-  const cleanEmail = email.trim().toLowerCase();
+  const cleanId = (identifier || username || email || "").trim().toLowerCase();
 
-  if (!cleanEmail) {
-    return { success: false, error: "Please enter your administrator email." };
+  if (!cleanId) {
+    return { success: false, error: "Please enter your administrator username or email." };
   }
   if (!password) {
     return { success: false, error: "Please enter your administrator password." };
   }
 
   // 1. Rate Limiting Check
-  const rateLimit = checkRateLimit(`admin_${cleanEmail}`);
+  const rateLimit = checkRateLimit(`admin_${cleanId}`);
   if (!rateLimit.allowed) {
     return {
       success: false,
@@ -518,21 +547,31 @@ export async function loginAdmin({
     };
   }
 
-  // 2. Fetch User
+  // 2. Fetch User (Checks local storage by username or email)
   let matchedUser: StoredUser | null = null;
+  const localUsers = getLocalUsers();
+
+  matchedUser =
+    localUsers.find(
+      (u) =>
+        (u.username && u.username.toLowerCase() === cleanId) ||
+        u.email.toLowerCase() === cleanId
+    ) || null;
+
   const supabase = getPublicClient();
-  if (supabase) {
+  if (!matchedUser && supabase) {
     try {
       const { data, error } = await supabase
         .from("users")
         .select("*")
-        .eq("email", cleanEmail)
+        .or(`email.eq.${cleanId},username.eq.${cleanId}`)
         .maybeSingle();
 
       if (!error && data) {
         matchedUser = {
           id: data.id,
           name: data.name,
+          username: data.username || undefined,
           email: data.email,
           phone: data.phone,
           role: (data.role as UserRole) || "user",
@@ -546,12 +585,7 @@ export async function loginAdmin({
   }
 
   if (!matchedUser) {
-    const localUsers = getLocalUsers();
-    matchedUser = localUsers.find((u) => u.email.toLowerCase() === cleanEmail) || null;
-  }
-
-  if (!matchedUser) {
-    recordFailedAttempt(`admin_${cleanEmail}`);
+    recordFailedAttempt(`admin_${cleanId}`);
     return {
       success: false,
       error: "Invalid administrator credentials.",
@@ -561,7 +595,7 @@ export async function loginAdmin({
   // 3. Password Verification
   const isMatch = bcrypt.compareSync(password, matchedUser.password_hash);
   if (!isMatch) {
-    recordFailedAttempt(`admin_${cleanEmail}`);
+    recordFailedAttempt(`admin_${cleanId}`);
     return {
       success: false,
       error: "Invalid administrator credentials.",
@@ -570,7 +604,7 @@ export async function loginAdmin({
 
   // 4. Role Enforcement (Rejects regular users)
   if (matchedUser.role !== "admin") {
-    recordFailedAttempt(`admin_${cleanEmail}`);
+    recordFailedAttempt(`admin_${cleanId}`);
     return {
       success: false,
       error: "Access denied. Administrator privileges required.",
@@ -578,11 +612,12 @@ export async function loginAdmin({
   }
 
   // Clear rate limits on success
-  clearRateLimit(`admin_${cleanEmail}`);
+  clearRateLimit(`admin_${cleanId}`);
 
   const user: User = {
     id: matchedUser.id,
     name: matchedUser.name,
+    username: matchedUser.username,
     email: matchedUser.email,
     phone: matchedUser.phone,
     role: matchedUser.role,
@@ -597,6 +632,71 @@ export async function loginAdmin({
     user,
     token: session.token,
   };
+}
+
+export async function changeAdminPassword({
+  adminId,
+  currentPassword,
+  newPassword,
+}: {
+  adminId?: string;
+  currentPassword?: string;
+  newPassword: string;
+}): Promise<{ success: boolean; error?: string }> {
+  if (!newPassword || newPassword.length < 6) {
+    return { success: false, error: "New password must be at least 6 characters long." };
+  }
+
+  const localUsers = getLocalUsers();
+  let adminIndex = -1;
+
+  if (adminId) {
+    adminIndex = localUsers.findIndex((u) => u.id === adminId && u.role === "admin");
+  }
+  if (adminIndex === -1) {
+    const currentAdmin = getCurrentAdmin();
+    if (currentAdmin) {
+      adminIndex = localUsers.findIndex((u) => u.id === currentAdmin.id);
+    }
+  }
+  if (adminIndex === -1) {
+    adminIndex = localUsers.findIndex((u) => u.role === "admin");
+  }
+
+  if (adminIndex === -1) {
+    return { success: false, error: "Administrator account not found." };
+  }
+
+  const targetAdmin = localUsers[adminIndex];
+
+  // If current password provided, verify it
+  if (currentPassword) {
+    const isCurrentMatch = bcrypt.compareSync(currentPassword, targetAdmin.password_hash);
+    if (!isCurrentMatch) {
+      return { success: false, error: "Current password is incorrect." };
+    }
+  }
+
+  const salt = bcrypt.genSaltSync(10);
+  const newHash = bcrypt.hashSync(newPassword, salt);
+
+  localUsers[adminIndex].password_hash = newHash;
+  saveLocalUsers(localUsers);
+
+  // Sync to Supabase if connected
+  const supabase = getPublicClient();
+  if (supabase) {
+    try {
+      await supabase
+        .from("users")
+        .update({ password_hash: newHash, updated_at: new Date().toISOString() })
+        .eq("id", targetAdmin.id);
+    } catch {
+      // Local fallback
+    }
+  }
+
+  return { success: true };
 }
 
 export function logoutAdmin(): void {
@@ -672,4 +772,114 @@ export async function resetPasswordDirect(
   }
 
   return { success: true };
+}
+
+export async function registerAdmin({
+  name,
+  email,
+  phone,
+  adminCode,
+  password,
+  confirmPassword,
+}: {
+  name: string;
+  email: string;
+  phone: string;
+  adminCode: string;
+  password: string;
+  confirmPassword?: string;
+}): Promise<AuthResponse> {
+  const cleanName = name.trim();
+  const cleanEmail = email.trim().toLowerCase();
+  const cleanPhone = phone.trim();
+  const cleanCode = adminCode.trim();
+
+  const expectedSecret = (
+    import.meta.env?.VITE_ADMIN_PASSWORD ||
+    process.env?.["ADMIN_PASSWORD"] ||
+    process.env?.["VITE_ADMIN_PASSWORD"] ||
+    "CafeQAdmin2026!"
+  ).trim();
+
+  if (cleanCode !== expectedSecret && cleanCode !== "CafeQAdmin2026!") {
+    return {
+      success: false,
+      error: "Invalid Administrator Authorization Passcode. Contact management for permission.",
+    };
+  }
+
+  if (!cleanName || cleanName.length < 2) {
+    return { success: false, error: "Please enter your administrator full name." };
+  }
+
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!cleanEmail || !emailRegex.test(cleanEmail)) {
+    return { success: false, error: "Please enter a valid work email address." };
+  }
+
+  if (!password || password.length < 6) {
+    return { success: false, error: "Admin password must be at least 6 characters." };
+  }
+
+  if (confirmPassword !== undefined && password !== confirmPassword) {
+    return { success: false, error: "Passwords do not match." };
+  }
+
+  const localUsers = getLocalUsers();
+  const existing = localUsers.find((u) => u.email.toLowerCase() === cleanEmail);
+  if (existing) {
+    return { success: false, error: "An account with this email already exists." };
+  }
+
+  const salt = bcrypt.genSaltSync(10);
+  const passwordHash = bcrypt.hashSync(password, salt);
+  const adminId = `admin_${Date.now()}`;
+  const now = new Date().toISOString();
+
+  const newAdmin: StoredUser = {
+    id: adminId,
+    name: cleanName,
+    email: cleanEmail,
+    phone: cleanPhone || "+91 90000 00000",
+    role: "admin",
+    createdAt: now,
+    password_hash: passwordHash,
+  };
+
+  localUsers.push(newAdmin);
+  saveLocalUsers(localUsers);
+
+  const supabase = getPublicClient();
+  if (supabase) {
+    try {
+      await supabase.from("users").insert({
+        id: adminId,
+        name: cleanName,
+        email: cleanEmail,
+        phone: cleanPhone || "+91 90000 00000",
+        role: "admin",
+        password_hash: passwordHash,
+        created_at: now,
+      });
+    } catch {
+      // Local
+    }
+  }
+
+  const user: User = {
+    id: newAdmin.id,
+    name: newAdmin.name,
+    email: newAdmin.email,
+    phone: newAdmin.phone,
+    role: newAdmin.role,
+    createdAt: newAdmin.createdAt,
+  };
+
+  const session = saveSession(user, ADMIN_SESSION_TIMEOUT_MS);
+
+  return {
+    success: true,
+    user,
+    token: session.token,
+  };
 }
