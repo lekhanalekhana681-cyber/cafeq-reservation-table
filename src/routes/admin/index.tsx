@@ -27,6 +27,15 @@ import {
   UserPlus,
   Power,
   Key,
+  UtensilsCrossed,
+  Wine,
+  Save,
+  Check,
+  Tag,
+  DollarSign,
+  SlidersHorizontal,
+  Image as ImageIcon,
+  Sparkles,
 } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -45,7 +54,15 @@ import {
   type BookingInput,
   type BookingStatus,
 } from "@/lib/bookings.functions";
-import { tableTypes } from "@/data/menu";
+import { tableTypes, type MenuItem } from "@/data/menu";
+import {
+  getStoredMenu,
+  updateMenuItemPrice,
+  updateMenuItem,
+  isCocktailsCategoryHidden,
+  setCocktailsCategoryHidden,
+  subscribeToMenuUpdates,
+} from "@/lib/menu";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -83,13 +100,35 @@ function AdminDashboardPage() {
   const [resettingUser, setResettingUser] = useState<User | null>(null);
   const [resetStaffPasswordInput, setResetStaffPasswordInput] = useState("");
 
-  // Filters
+  // Top-level Admin View Tab ("reservations" | "menu")
+  const [activeAdminTab, setActiveAdminTab] = useState<"reservations" | "menu">("reservations");
+
+  // Menu Manager State
+  const [menuItems, setMenuItems] = useState<MenuItem[]>([]);
+  const [menuSearch, setMenuSearch] = useState("");
+  const [selectedCategory, setSelectedCategory] = useState<string>("all");
+  const [vegFilter, setVegFilter] = useState<"all" | "veg" | "non-veg" | "alcoholic">("all");
+  const [hideCocktails, setHideCocktails] = useState<boolean>(false);
+  const [priceDrafts, setPriceDrafts] = useState<Record<string, string>>({});
+  const [savingPriceId, setSavingPriceId] = useState<string | null>(null);
+
+  // Reservation Filters
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [dateFilter, setDateFilter] = useState<"all" | "today" | "upcoming">("all");
   const [actionLoadingCode, setActionLoadingCode] = useState<string | null>(null);
 
   const todayStr = useMemo(() => new Date().toISOString().slice(0, 10), []);
+
+  const refreshMenu = () => {
+    try {
+      const items = getStoredMenu();
+      setMenuItems(items);
+      setHideCocktails(isCocktailsCategoryHidden());
+    } catch (err) {
+      console.error("Failed to load menu in admin:", err);
+    }
+  };
 
   // Route Guard / Protection
   useEffect(() => {
@@ -102,6 +141,10 @@ function AdminDashboardPage() {
     setAdmin(current);
     loadBookings();
     loadKitchenStaff();
+    refreshMenu();
+
+    const unsubMenu = subscribeToMenuUpdates(refreshMenu);
+    return () => unsubMenu();
   }, [navigate]);
 
   const loadKitchenStaff = () => {
@@ -302,6 +345,88 @@ function AdminDashboardPage() {
     });
   }, [bookings, searchQuery, statusFilter, dateFilter, todayStr]);
 
+  // Menu Item Actions
+  const handlePriceDraftChange = (id: string, val: string) => {
+    setPriceDrafts((prev) => ({ ...prev, [id]: val }));
+  };
+
+  const handleSavePrice = (item: MenuItem) => {
+    const draftVal = priceDrafts[item.id];
+    const numPrice = draftVal !== undefined ? parseFloat(draftVal) : item.price;
+    if (isNaN(numPrice) || numPrice < 0) {
+      toast.error("Please enter a valid price in ₹.");
+      return;
+    }
+    setSavingPriceId(item.id);
+    const success = updateMenuItemPrice(item.id, numPrice);
+    if (success) {
+      toast.success(`Updated "${item.name}" price to ₹${Math.round(numPrice)}`);
+      setPriceDrafts((prev) => {
+        const next = { ...prev };
+        delete next[item.id];
+        return next;
+      });
+      refreshMenu();
+    } else {
+      toast.error("Failed to update price.");
+    }
+    setSavingPriceId(null);
+  };
+
+  const handleToggleItemAvailability = (item: MenuItem) => {
+    const nextAvailability = !item.isAvailable;
+    updateMenuItem(item.id, { isAvailable: nextAvailability });
+    toast.success(
+      `"${item.name}" is now marked ${nextAvailability ? "In Stock" : "86'd / Out of Stock"}`
+    );
+    refreshMenu();
+  };
+
+  const handleToggleCocktailsCategory = () => {
+    const next = !hideCocktails;
+    setCocktailsCategoryHidden(next);
+    setHideCocktails(next);
+    if (next) {
+      toast.warning("Cocktails category HIDDEN from customer menu (Liquor license offline).");
+    } else {
+      toast.success("Cocktails category ACTIVE and visible to customers (18+ verification enforced).");
+    }
+  };
+
+  const allCategories = useMemo(() => {
+    const cats = new Set(menuItems.map((m) => m.category));
+    return Array.from(cats);
+  }, [menuItems]);
+
+  const filteredMenuItems = useMemo(() => {
+    return menuItems.filter((item) => {
+      if (menuSearch.trim()) {
+        const q = menuSearch.toLowerCase().trim();
+        const mName = item.name.toLowerCase().includes(q);
+        const mDesc = item.description?.toLowerCase().includes(q);
+        const mCat = item.category.toLowerCase().includes(q);
+        if (!mName && !mDesc && !mCat) return false;
+      }
+      if (selectedCategory !== "all" && item.category !== selectedCategory) {
+        return false;
+      }
+      if (vegFilter === "veg" && !item.isVeg) return false;
+      if (vegFilter === "non-veg" && item.isVeg) return false;
+      if (vegFilter === "alcoholic" && !item.isAlcoholic) return false;
+      return true;
+    });
+  }, [menuItems, menuSearch, selectedCategory, vegFilter]);
+
+  const menuStats = useMemo(() => {
+    return {
+      total: menuItems.length,
+      veg: menuItems.filter((i) => i.isVeg).length,
+      nonVeg: menuItems.filter((i) => !i.isVeg).length,
+      alcoholic: menuItems.filter((i) => i.isAlcoholic).length,
+      outOfStock: menuItems.filter((i) => !i.isAvailable).length,
+    };
+  }, [menuItems]);
+
   if (loading) {
     return (
       <div className="min-h-screen bg-neutral-950 text-neutral-100 flex items-center justify-center">
@@ -429,312 +554,763 @@ function AdminDashboardPage() {
             <KeyRound className="size-3.5 mr-1.5" /> Update Password
           </Button>
         </div>
-        {/* KPI Metric Cards */}
-        <section className="grid grid-cols-2 lg:grid-cols-5 gap-3.5 sm:gap-4">
-          <div className="rounded-2xl border border-neutral-800 bg-neutral-900/60 p-4 shadow-sm">
-            <div className="flex items-center justify-between text-neutral-400 text-xs font-medium">
-              <span>Today's Bookings</span>
-              <CalendarCheck className="size-4 text-amber-500" />
-            </div>
-            <p className="mt-2 text-2xl sm:text-3xl font-display font-bold text-white">
-              {metrics.todayCount}
-            </p>
-            <p className="mt-1 text-[11px] text-neutral-500">
-              {metrics.totalGuestsToday} guests expected today
-            </p>
-          </div>
 
-          <div className="rounded-2xl border border-neutral-800 bg-neutral-900/60 p-4 shadow-sm">
-            <div className="flex items-center justify-between text-neutral-400 text-xs font-medium">
-              <span>Total Bookings</span>
-              <Clock className="size-4 text-neutral-400" />
-            </div>
-            <p className="mt-2 text-2xl sm:text-3xl font-display font-bold text-white">
-              {metrics.total}
-            </p>
-            <p className="mt-1 text-[11px] text-neutral-500">All-time reservations</p>
-          </div>
-
-          <div className="rounded-2xl border border-emerald-900/40 bg-emerald-950/20 p-4 shadow-sm">
-            <div className="flex items-center justify-between text-emerald-400 text-xs font-medium">
-              <span>Confirmed</span>
-              <CheckCircle2 className="size-4 text-emerald-400" />
-            </div>
-            <p className="mt-2 text-2xl sm:text-3xl font-display font-bold text-emerald-300">
-              {metrics.confirmedCount}
-            </p>
-            <p className="mt-1 text-[11px] text-emerald-500/70">Awaiting arrival</p>
-          </div>
-
-          <div className="rounded-2xl border border-blue-900/40 bg-blue-950/20 p-4 shadow-sm">
-            <div className="flex items-center justify-between text-blue-400 text-xs font-medium">
-              <span>Completed</span>
-              <Coffee className="size-4 text-blue-400" />
-            </div>
-            <p className="mt-2 text-2xl sm:text-3xl font-display font-bold text-blue-300">
-              {metrics.completedCount}
-            </p>
-            <p className="mt-1 text-[11px] text-blue-500/70">Dined successfully</p>
-          </div>
-
-          <div className="col-span-2 lg:col-span-1 rounded-2xl border border-neutral-800 bg-neutral-900/60 p-4 shadow-sm">
-            <div className="flex items-center justify-between text-neutral-400 text-xs font-medium">
-              <span>Cancelled / No-show</span>
-              <XCircle className="size-4 text-red-400" />
-            </div>
-            <p className="mt-2 text-2xl sm:text-3xl font-display font-bold text-neutral-300">
-              {metrics.cancelledCount}
-            </p>
-            <p className="mt-1 text-[11px] text-neutral-500">Voided slots</p>
-          </div>
-        </section>
-
-        {/* Search & Filter Toolbar */}
-        <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-4 flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3">
-          <div className="relative flex-1 max-w-md">
-            <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 size-4 text-neutral-500" />
-            <Input
-              type="text"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search by guest name, phone, or CQ code…"
-              className="bg-neutral-950 border-neutral-800 text-neutral-100 placeholder:text-neutral-600 pl-10 text-xs h-10"
-            />
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2">
-            {/* Date filter */}
-            <div className="flex items-center rounded-xl bg-neutral-950 p-1 border border-neutral-800 text-xs">
-              <button
-                type="button"
-                onClick={() => setDateFilter("all")}
-                className={`px-3 py-1.5 rounded-lg transition-colors font-medium ${
-                  dateFilter === "all"
-                    ? "bg-amber-600 text-neutral-950 font-bold"
-                    : "text-neutral-400 hover:text-white"
-                }`}
-              >
-                All Dates
-              </button>
-              <button
-                type="button"
-                onClick={() => setDateFilter("today")}
-                className={`px-3 py-1.5 rounded-lg transition-colors font-medium ${
-                  dateFilter === "today"
-                    ? "bg-amber-600 text-neutral-950 font-bold"
-                    : "text-neutral-400 hover:text-white"
-                }`}
-              >
-                Today
-              </button>
-              <button
-                type="button"
-                onClick={() => setDateFilter("upcoming")}
-                className={`px-3 py-1.5 rounded-lg transition-colors font-medium ${
-                  dateFilter === "upcoming"
-                    ? "bg-amber-600 text-neutral-950 font-bold"
-                    : "text-neutral-400 hover:text-white"
-                }`}
-              >
-                Upcoming
-              </button>
-            </div>
-
-            {/* Status filter dropdown */}
-            <select
-              value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value)}
-              className="rounded-xl bg-neutral-950 border border-neutral-800 text-neutral-300 text-xs px-3 py-2 focus:outline-none focus:border-amber-500"
+        {/* Admin Navigation Tabs */}
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-neutral-800 pb-4">
+          <div className="flex items-center gap-2 rounded-2xl bg-neutral-900 p-1.5 border border-neutral-800">
+            <button
+              type="button"
+              onClick={() => setActiveAdminTab("reservations")}
+              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold transition-all ${
+                activeAdminTab === "reservations"
+                  ? "bg-amber-600 text-neutral-950 shadow-md font-bold"
+                  : "text-neutral-400 hover:text-white"
+              }`}
             >
-              <option value="all">All Statuses</option>
-              <option value="confirmed">Confirmed</option>
-              <option value="completed">Completed</option>
-              <option value="cancelled">Cancelled</option>
-              <option value="no_show">No-Show</option>
-            </select>
+              <CalendarCheck className="size-4" />
+              <span>Reservations & Orders</span>
+              <span className="rounded-full bg-neutral-950/40 text-[10px] px-2 py-0.5 ml-1">
+                {bookings.length}
+              </span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveAdminTab("menu")}
+              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold transition-all ${
+                activeAdminTab === "menu"
+                  ? "bg-amber-600 text-neutral-950 shadow-md font-bold"
+                  : "text-neutral-400 hover:text-white"
+              }`}
+            >
+              <UtensilsCrossed className="size-4" />
+              <span>Menu & Price Manager</span>
+              <span className="rounded-full bg-neutral-950/40 text-[10px] px-2 py-0.5 ml-1">
+                {menuItems.length}
+              </span>
+            </button>
+          </div>
 
+          <div className="flex items-center gap-2.5">
+            {hideCocktails ? (
+              <Badge className="bg-red-950/80 text-red-400 border border-red-700/50 text-[11px] py-1 px-3">
+                🍷 Cocktails Category Hidden
+              </Badge>
+            ) : (
+              <Badge className="bg-emerald-950/80 text-emerald-300 border border-emerald-600/50 text-[11px] py-1 px-3">
+                🍷 Cocktails Active (18+)
+              </Badge>
+            )}
             <Button
               variant="outline"
               size="sm"
-              onClick={loadBookings}
-              disabled={refreshing}
-              className="bg-neutral-950 border-neutral-800 text-neutral-400 hover:text-white h-10 px-3"
+              onClick={refreshMenu}
+              className="bg-neutral-900 border-neutral-800 text-neutral-300 text-xs hover:text-white"
+              title="Refresh Menu State"
             >
-              <RefreshCw className={`size-3.5 ${refreshing ? "animate-spin" : ""}`} />
+              <RefreshCw className="size-3.5 mr-1" /> Reload Menu
             </Button>
           </div>
-        </section>
+        </div>
 
-        {/* Reservations Table */}
-        <section className="rounded-2xl border border-neutral-800 bg-neutral-900/60 overflow-hidden shadow-xl">
-          <div className="border-b border-neutral-800 px-6 py-4 flex items-center justify-between">
-            <h2 className="font-display font-semibold text-base text-neutral-200">
-              Reservation Logs ({filteredBookings.length})
-            </h2>
-            <span className="text-xs text-neutral-500">Auto-synced</span>
-          </div>
+        {/* Tab 1: Reservations & Orders */}
+        {activeAdminTab === "reservations" && (
+          <>
+            {/* KPI Metric Cards */}
+            <section className="grid grid-cols-2 lg:grid-cols-5 gap-3.5 sm:gap-4">
+              <div className="rounded-2xl border border-neutral-800 bg-neutral-900/60 p-4 shadow-sm">
+                <div className="flex items-center justify-between text-neutral-400 text-xs font-medium">
+                  <span>Today's Bookings</span>
+                  <CalendarCheck className="size-4 text-amber-500" />
+                </div>
+                <p className="mt-2 text-2xl sm:text-3xl font-display font-bold text-white">
+                  {metrics.todayCount}
+                </p>
+                <p className="mt-1 text-[11px] text-neutral-500">
+                  {metrics.totalGuestsToday} guests expected today
+                </p>
+              </div>
 
-          {filteredBookings.length === 0 ? (
-            <div className="p-12 text-center text-neutral-500 text-sm">
-              No reservations found matching the selected criteria.
-            </div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs">
-                <thead className="bg-neutral-950/70 border-b border-neutral-800 text-neutral-400 uppercase tracking-wider text-[11px]">
-                  <tr>
-                    <th className="px-5 py-3.5 font-semibold">Code / Time</th>
-                    <th className="px-5 py-3.5 font-semibold">Date</th>
-                    <th className="px-5 py-3.5 font-semibold">Guest</th>
-                    <th className="px-5 py-3.5 font-semibold">Table & Party</th>
-                    <th className="px-5 py-3.5 font-semibold">Pre-Order / Total</th>
-                    <th className="px-5 py-3.5 font-semibold">Status</th>
-                    <th className="px-5 py-3.5 font-semibold text-right">Actions</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-neutral-800/60 text-neutral-200">
-                  {filteredBookings.map((b) => {
-                    const tableInfo = tableTypes.find((t) => t.id === b.tableType);
-                    const preOrdered = b.items?.filter((i) => i.fulfillment === "pre_ordered") || [];
+              <div className="rounded-2xl border border-neutral-800 bg-neutral-900/60 p-4 shadow-sm">
+                <div className="flex items-center justify-between text-neutral-400 text-xs font-medium">
+                  <span>Total Bookings</span>
+                  <Clock className="size-4 text-neutral-400" />
+                </div>
+                <p className="mt-2 text-2xl sm:text-3xl font-display font-bold text-white">
+                  {metrics.total}
+                </p>
+                <p className="mt-1 text-[11px] text-neutral-500">All-time reservations</p>
+              </div>
 
-                    return (
-                      <tr key={b.code} className="hover:bg-neutral-800/40 transition-colors">
-                        {/* Code & Time */}
-                        <td className="px-5 py-4 whitespace-nowrap">
-                          <span className="font-mono font-bold text-amber-400 text-sm">{b.code}</span>
-                          <div className="text-[11px] text-neutral-400 flex items-center gap-1 mt-0.5">
-                            <Clock className="size-3 text-neutral-500" />
-                            {b.time}
-                          </div>
-                        </td>
+              <div className="rounded-2xl border border-emerald-900/40 bg-emerald-950/20 p-4 shadow-sm">
+                <div className="flex items-center justify-between text-emerald-400 text-xs font-medium">
+                  <span>Confirmed</span>
+                  <CheckCircle2 className="size-4 text-emerald-400" />
+                </div>
+                <p className="mt-2 text-2xl sm:text-3xl font-display font-bold text-emerald-300">
+                  {metrics.confirmedCount}
+                </p>
+                <p className="mt-1 text-[11px] text-emerald-500/70">Awaiting arrival</p>
+              </div>
 
-                        {/* Date */}
-                        <td className="px-5 py-4 whitespace-nowrap">
-                          <span className={b.date === todayStr ? "font-bold text-amber-300" : "text-neutral-300"}>
-                            {b.date}
-                          </span>
-                          {b.date === todayStr && (
-                            <span className="ml-1.5 inline-block text-[10px] bg-amber-500/20 text-amber-400 px-1.5 py-0.5 rounded font-bold">
-                              TODAY
-                            </span>
-                          )}
-                        </td>
+              <div className="rounded-2xl border border-blue-900/40 bg-blue-950/20 p-4 shadow-sm">
+                <div className="flex items-center justify-between text-blue-400 text-xs font-medium">
+                  <span>Completed</span>
+                  <Coffee className="size-4 text-blue-400" />
+                </div>
+                <p className="mt-2 text-2xl sm:text-3xl font-display font-bold text-blue-300">
+                  {metrics.completedCount}
+                </p>
+                <p className="mt-1 text-[11px] text-blue-500/70">Dined successfully</p>
+              </div>
 
-                        {/* Guest */}
-                        <td className="px-5 py-4 whitespace-nowrap">
-                          <div className="font-medium text-white">{b.name}</div>
-                          <div className="text-[11px] text-neutral-400">{b.phone}</div>
-                          {b.customerEmail && (
-                            <div className="text-[11px] text-neutral-500">{b.customerEmail}</div>
-                          )}
-                        </td>
+              <div className="col-span-2 lg:col-span-1 rounded-2xl border border-neutral-800 bg-neutral-900/60 p-4 shadow-sm">
+                <div className="flex items-center justify-between text-neutral-400 text-xs font-medium">
+                  <span>Cancelled / No-show</span>
+                  <XCircle className="size-4 text-red-400" />
+                </div>
+                <p className="mt-2 text-2xl sm:text-3xl font-display font-bold text-neutral-300">
+                  {metrics.cancelledCount}
+                </p>
+                <p className="mt-1 text-[11px] text-neutral-500">Voided slots</p>
+              </div>
+            </section>
 
-                        {/* Table & Party */}
-                        <td className="px-5 py-4 whitespace-nowrap">
-                          <Badge variant="outline" className="border-neutral-700 bg-neutral-800 text-neutral-300 text-[11px]">
-                            {tableInfo?.name || b.seating}
-                          </Badge>
-                          <div className="text-[11px] text-neutral-400 mt-1 flex items-center gap-1">
-                            <Users className="size-3 text-neutral-500" /> {b.party} {b.party === 1 ? "Guest" : "Guests"}
-                          </div>
-                        </td>
+            {/* Search & Filter Toolbar */}
+            <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-4 flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3">
+              <div className="relative flex-1 max-w-md">
+                <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 size-4 text-neutral-500" />
+                <Input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Search by guest name, phone, or CQ code…"
+                  className="bg-neutral-950 border-neutral-800 text-neutral-100 placeholder:text-neutral-600 pl-10 text-xs h-10"
+                />
+              </div>
 
-                        {/* Pre-Order / Total */}
-                        <td className="px-5 py-4 whitespace-nowrap">
-                          <div className="font-semibold text-white">₹{b.total}</div>
-                          <div className="text-[11px] text-neutral-400">
-                            {preOrdered.length > 0 ? `${preOrdered.length} items pre-ordered` : "No pre-order"}
-                          </div>
-                        </td>
+              <div className="flex flex-wrap items-center gap-2">
+                {/* Date filter */}
+                <div className="flex items-center rounded-xl bg-neutral-950 p-1 border border-neutral-800 text-xs">
+                  <button
+                    type="button"
+                    onClick={() => setDateFilter("all")}
+                    className={`px-3 py-1.5 rounded-lg transition-colors font-medium ${
+                      dateFilter === "all"
+                        ? "bg-amber-600 text-neutral-950 font-bold"
+                        : "text-neutral-400 hover:text-white"
+                    }`}
+                  >
+                    All Dates
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setDateFilter("today")}
+                    className={`px-3 py-1.5 rounded-lg transition-colors font-medium ${
+                      dateFilter === "today"
+                        ? "bg-amber-600 text-neutral-950 font-bold"
+                        : "text-neutral-400 hover:text-white"
+                    }`}
+                  >
+                    Today
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setDateFilter("upcoming")}
+                    className={`px-3 py-1.5 rounded-lg transition-colors font-medium ${
+                      dateFilter === "upcoming"
+                        ? "bg-amber-600 text-neutral-950 font-bold"
+                        : "text-neutral-400 hover:text-white"
+                    }`}
+                  >
+                    Upcoming
+                  </button>
+                </div>
 
-                        {/* Status Badge */}
-                        <td className="px-5 py-4 whitespace-nowrap">
-                          {b.status === "confirmed" && (
-                            <Badge className="bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 text-[11px]">
-                              Confirmed
-                            </Badge>
-                          )}
-                          {b.status === "completed" && (
-                            <Badge className="bg-blue-500/20 text-blue-400 border border-blue-500/30 text-[11px]">
-                              Completed
-                            </Badge>
-                          )}
-                          {b.status === "cancelled" && (
-                            <Badge className="bg-red-500/20 text-red-400 border border-red-500/30 text-[11px]">
-                              Cancelled
-                            </Badge>
-                          )}
-                          {b.status === "no_show" && (
-                            <Badge className="bg-amber-500/20 text-amber-400 border border-amber-500/30 text-[11px]">
-                              No-Show
-                            </Badge>
-                          )}
-                        </td>
+                {/* Status filter dropdown */}
+                <select
+                  value={statusFilter}
+                  onChange={(e) => setStatusFilter(e.target.value)}
+                  className="rounded-xl bg-neutral-950 border border-neutral-800 text-neutral-300 text-xs px-3 py-2 focus:outline-none focus:border-amber-500"
+                >
+                  <option value="all">All Statuses</option>
+                  <option value="confirmed">Confirmed</option>
+                  <option value="completed">Completed</option>
+                  <option value="cancelled">Cancelled</option>
+                  <option value="no_show">No-Show</option>
+                </select>
 
-                        {/* Actions */}
-                        <td className="px-5 py-4 whitespace-nowrap text-right">
-                          <div className="flex items-center justify-end gap-1.5">
-                            {b.status !== "confirmed" && (
-                              <Button
-                                size="sm"
-                                variant="ghost"
-                                onClick={() => handleUpdateStatus(b.code, "confirmed")}
-                                disabled={actionLoadingCode === b.code}
-                                className="h-7 px-2 text-[11px] text-emerald-400 hover:text-emerald-300 hover:bg-emerald-950/50"
-                                title="Mark as Confirmed"
-                              >
-                                Confirm
-                              </Button>
-                            )}
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={loadBookings}
+                  disabled={refreshing}
+                  className="bg-neutral-950 border-neutral-800 text-neutral-400 hover:text-white h-10 px-3"
+                >
+                  <RefreshCw className={`size-3.5 ${refreshing ? "animate-spin" : ""}`} />
+                </Button>
+              </div>
+            </section>
 
-                            {b.status !== "completed" && (
-                              <Button
-                                size="sm"
-                                variant="ghost"
-                                onClick={() => handleUpdateStatus(b.code, "completed")}
-                                disabled={actionLoadingCode === b.code}
-                                className="h-7 px-2 text-[11px] text-blue-400 hover:text-blue-300 hover:bg-blue-950/50"
-                                title="Mark as Completed / Dined"
-                              >
-                                Complete
-                              </Button>
-                            )}
+            {/* Reservations Table */}
+            <section className="rounded-2xl border border-neutral-800 bg-neutral-900/60 overflow-hidden shadow-xl">
+              <div className="border-b border-neutral-800 px-6 py-4 flex items-center justify-between">
+                <h2 className="font-display font-semibold text-base text-neutral-200">
+                  Reservation Logs ({filteredBookings.length})
+                </h2>
+                <span className="text-xs text-neutral-500">Auto-synced</span>
+              </div>
 
-                            {b.status !== "no_show" && b.status !== "completed" && (
-                              <Button
-                                size="sm"
-                                variant="ghost"
-                                onClick={() => handleUpdateStatus(b.code, "no_show")}
-                                disabled={actionLoadingCode === b.code}
-                                className="h-7 px-2 text-[11px] text-amber-400 hover:text-amber-300 hover:bg-amber-950/50"
-                                title="Mark as No-Show"
-                              >
-                                No-Show
-                              </Button>
-                            )}
-
-                            {b.status !== "cancelled" && (
-                              <Button
-                                size="sm"
-                                variant="ghost"
-                                onClick={() => handleUpdateStatus(b.code, "cancelled")}
-                                disabled={actionLoadingCode === b.code}
-                                className="h-7 px-2 text-[11px] text-red-400 hover:text-red-300 hover:bg-red-950/50"
-                                title="Cancel Reservation"
-                              >
-                                Cancel
-                              </Button>
-                            )}
-                          </div>
-                        </td>
+              {filteredBookings.length === 0 ? (
+                <div className="p-12 text-center text-neutral-500 text-sm">
+                  No reservations found matching the selected criteria.
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-xs">
+                    <thead className="bg-neutral-950/70 border-b border-neutral-800 text-neutral-400 uppercase tracking-wider text-[11px]">
+                      <tr>
+                        <th className="px-5 py-3.5 font-semibold">Code / Time</th>
+                        <th className="px-5 py-3.5 font-semibold">Date</th>
+                        <th className="px-5 py-3.5 font-semibold">Guest</th>
+                        <th className="px-5 py-3.5 font-semibold">Table & Party</th>
+                        <th className="px-5 py-3.5 font-semibold">Pre-Order / Total</th>
+                        <th className="px-5 py-3.5 font-semibold">Status</th>
+                        <th className="px-5 py-3.5 font-semibold text-right">Actions</th>
                       </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+                    </thead>
+                    <tbody className="divide-y divide-neutral-800/60 text-neutral-200">
+                      {filteredBookings.map((b) => {
+                        const tableInfo = tableTypes.find((t) => t.id === b.tableType);
+                        const preOrdered = b.items?.filter((i) => i.fulfillment === "pre_ordered") || [];
+
+                        return (
+                          <tr key={b.code} className="hover:bg-neutral-800/40 transition-colors">
+                            {/* Code & Time */}
+                            <td className="px-5 py-4 whitespace-nowrap">
+                              <span className="font-mono font-bold text-amber-400 text-sm">{b.code}</span>
+                              <div className="text-[11px] text-neutral-400 flex items-center gap-1 mt-0.5">
+                                <Clock className="size-3 text-neutral-500" />
+                                {b.time}
+                              </div>
+                            </td>
+
+                            {/* Date */}
+                            <td className="px-5 py-4 whitespace-nowrap">
+                              <span className={b.date === todayStr ? "font-bold text-amber-300" : "text-neutral-300"}>
+                                {b.date}
+                              </span>
+                              {b.date === todayStr && (
+                                <span className="ml-1.5 inline-block text-[10px] bg-amber-500/20 text-amber-400 px-1.5 py-0.5 rounded font-bold">
+                                  TODAY
+                                </span>
+                              )}
+                            </td>
+
+                            {/* Guest */}
+                            <td className="px-5 py-4 whitespace-nowrap">
+                              <div className="font-medium text-white">{b.name}</div>
+                              <div className="text-[11px] text-neutral-400">{b.phone}</div>
+                              {b.customerEmail && (
+                                <div className="text-[11px] text-neutral-500">{b.customerEmail}</div>
+                              )}
+                            </td>
+
+                            {/* Table & Party */}
+                            <td className="px-5 py-4 whitespace-nowrap">
+                              <Badge variant="outline" className="border-neutral-700 bg-neutral-800 text-neutral-300 text-[11px]">
+                                {tableInfo?.name || b.seating}
+                              </Badge>
+                              <div className="text-[11px] text-neutral-400 mt-1 flex items-center gap-1">
+                                <Users className="size-3 text-neutral-500" /> {b.party} {b.party === 1 ? "Guest" : "Guests"}
+                              </div>
+                            </td>
+
+                            {/* Pre-Order / Total */}
+                            <td className="px-5 py-4 whitespace-nowrap">
+                              <div className="font-semibold text-white">₹{b.total}</div>
+                              <div className="text-[11px] text-neutral-400">
+                                {preOrdered.length > 0 ? `${preOrdered.length} items pre-ordered` : "No pre-order"}
+                              </div>
+                            </td>
+
+                            {/* Status Badge */}
+                            <td className="px-5 py-4 whitespace-nowrap">
+                              {b.status === "confirmed" && (
+                                <Badge className="bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 text-[11px]">
+                                  Confirmed
+                                </Badge>
+                              )}
+                              {b.status === "completed" && (
+                                <Badge className="bg-blue-500/20 text-blue-400 border border-blue-500/30 text-[11px]">
+                                  Completed
+                                </Badge>
+                              )}
+                              {b.status === "cancelled" && (
+                                <Badge className="bg-red-500/20 text-red-400 border border-red-500/30 text-[11px]">
+                                  Cancelled
+                                </Badge>
+                              )}
+                              {b.status === "no_show" && (
+                                <Badge className="bg-amber-500/20 text-amber-400 border border-amber-500/30 text-[11px]">
+                                  No-Show
+                                </Badge>
+                              )}
+                            </td>
+
+                            {/* Actions */}
+                            <td className="px-5 py-4 whitespace-nowrap text-right">
+                              <div className="flex items-center justify-end gap-1.5">
+                                {b.status !== "confirmed" && (
+                                  <Button
+                                    size="sm"
+                                    variant="ghost"
+                                    onClick={() => handleUpdateStatus(b.code, "confirmed")}
+                                    disabled={actionLoadingCode === b.code}
+                                    className="h-7 px-2 text-[11px] text-emerald-400 hover:text-emerald-300 hover:bg-emerald-950/50"
+                                    title="Mark as Confirmed"
+                                  >
+                                    Confirm
+                                  </Button>
+                                )}
+
+                                {b.status !== "completed" && (
+                                  <Button
+                                    size="sm"
+                                    variant="ghost"
+                                    onClick={() => handleUpdateStatus(b.code, "completed")}
+                                    disabled={actionLoadingCode === b.code}
+                                    className="h-7 px-2 text-[11px] text-blue-400 hover:text-blue-300 hover:bg-blue-950/50"
+                                    title="Mark as Completed / Dined"
+                                  >
+                                    Complete
+                                  </Button>
+                                )}
+
+                                {b.status !== "no_show" && b.status !== "completed" && (
+                                  <Button
+                                    size="sm"
+                                    variant="ghost"
+                                    onClick={() => handleUpdateStatus(b.code, "no_show")}
+                                    disabled={actionLoadingCode === b.code}
+                                    className="h-7 px-2 text-[11px] text-amber-400 hover:text-amber-300 hover:bg-amber-950/50"
+                                    title="Mark as No-Show"
+                                  >
+                                    No-Show
+                                  </Button>
+                                )}
+
+                                {b.status !== "cancelled" && (
+                                  <Button
+                                    size="sm"
+                                    variant="ghost"
+                                    onClick={() => handleUpdateStatus(b.code, "cancelled")}
+                                    disabled={actionLoadingCode === b.code}
+                                    className="h-7 px-2 text-[11px] text-red-400 hover:text-red-300 hover:bg-red-950/50"
+                                    title="Cancel Reservation"
+                                  >
+                                    Cancel
+                                  </Button>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </section>
+          </>
+        )}
+
+        {/* Tab 2: Menu & Price Manager */}
+        {activeAdminTab === "menu" && (
+          <div className="space-y-6">
+            {/* Alcohol License / Cocktails Category Toggle Banner */}
+            <div className="rounded-2xl border border-amber-500/30 bg-neutral-900/80 p-5 sm:p-6 backdrop-blur-md shadow-xl">
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-5">
+                <div className="flex items-start gap-4">
+                  <div
+                    className={`size-12 rounded-2xl flex items-center justify-center shrink-0 border transition-all ${
+                      hideCocktails
+                        ? "bg-red-950/40 border-red-500/30 text-red-400"
+                        : "bg-amber-500/10 border-amber-500/30 text-amber-400 shadow-inner"
+                    }`}
+                  >
+                    <Wine className="size-6" />
+                  </div>
+                  <div>
+                    <div className="flex flex-wrap items-center gap-2.5">
+                      <h3 className="text-base font-bold text-white font-display">
+                        Bar & Liquor License Compliance
+                      </h3>
+                      {hideCocktails ? (
+                        <Badge className="bg-red-950/80 text-red-300 border border-red-700/50 text-[10px]">
+                          License Offline • Cocktails Hidden
+                        </Badge>
+                      ) : (
+                        <Badge className="bg-emerald-950/80 text-emerald-300 border border-emerald-600/50 text-[10px]">
+                          Active License • 18+ Verification Enforced
+                        </Badge>
+                      )}
+                    </div>
+                    <p className="mt-1 text-xs text-neutral-300 max-w-2xl leading-relaxed">
+                      Statutory alcohol compliance: Under Indian liquor licensing laws, cocktails may only be served when an active bar license is in effect. When toggled OFF, the entire Cocktails category is instantly hidden from customer menus and reservation pre-orders.
+                    </p>
+                  </div>
+                </div>
+
+                <Button
+                  onClick={handleToggleCocktailsCategory}
+                  className={`shrink-0 font-bold text-xs h-10 px-4 transition-all shadow-md ${
+                    hideCocktails
+                      ? "bg-emerald-600 hover:bg-emerald-500 text-neutral-950 shadow-emerald-950/50"
+                      : "bg-red-950/80 hover:bg-red-900 text-red-300 border border-red-700/50"
+                  }`}
+                >
+                  {hideCocktails ? (
+                    <>
+                      <Check className="size-4 mr-1.5" /> Enable Cocktails Category (18+)
+                    </>
+                  ) : (
+                    <>
+                      <EyeOff className="size-4 mr-1.5" /> Hide Cocktails Category (No License)
+                    </>
+                  )}
+                </Button>
+              </div>
             </div>
-          )}
-        </section>
+
+            {/* Menu Statistics KPI Cards */}
+            <section className="grid grid-cols-2 lg:grid-cols-5 gap-3.5 sm:gap-4">
+              <div className="rounded-2xl border border-neutral-800 bg-neutral-900/60 p-4 shadow-sm">
+                <div className="flex items-center justify-between text-neutral-400 text-xs font-medium">
+                  <span>Total Menu Items</span>
+                  <UtensilsCrossed className="size-4 text-amber-500" />
+                </div>
+                <p className="mt-2 text-2xl sm:text-3xl font-display font-bold text-white">
+                  {menuStats.total}
+                </p>
+                <p className="mt-1 text-[11px] text-neutral-500">Across {allCategories.length} categories</p>
+              </div>
+
+              <div className="rounded-2xl border border-emerald-900/40 bg-emerald-950/20 p-4 shadow-sm">
+                <div className="flex items-center justify-between text-emerald-400 text-xs font-medium">
+                  <span>Vegetarian</span>
+                  <span className="size-2 rounded-full bg-emerald-400"></span>
+                </div>
+                <p className="mt-2 text-2xl sm:text-3xl font-display font-bold text-emerald-300">
+                  {menuStats.veg}
+                </p>
+                <p className="mt-1 text-[11px] text-emerald-500/70">Pure veg items</p>
+              </div>
+
+              <div className="rounded-2xl border border-rose-900/40 bg-rose-950/20 p-4 shadow-sm">
+                <div className="flex items-center justify-between text-rose-400 text-xs font-medium">
+                  <span>Non-Vegetarian</span>
+                  <span className="size-2 rounded-full bg-rose-400"></span>
+                </div>
+                <p className="mt-2 text-2xl sm:text-3xl font-display font-bold text-rose-300">
+                  {menuStats.nonVeg}
+                </p>
+                <p className="mt-1 text-[11px] text-rose-500/70">Chicken & meat options</p>
+              </div>
+
+              <div className="rounded-2xl border border-amber-900/40 bg-amber-950/20 p-4 shadow-sm">
+                <div className="flex items-center justify-between text-amber-400 text-xs font-medium">
+                  <span>Cocktails (18+)</span>
+                  <Wine className="size-4 text-amber-400" />
+                </div>
+                <p className="mt-2 text-2xl sm:text-3xl font-display font-bold text-amber-300">
+                  {menuStats.alcoholic}
+                </p>
+                <p className="mt-1 text-[11px] text-amber-500/70">
+                  {hideCocktails ? "Hidden from public" : "Available to 18+"}
+                </p>
+              </div>
+
+              <div className="col-span-2 lg:col-span-1 rounded-2xl border border-neutral-800 bg-neutral-900/60 p-4 shadow-sm">
+                <div className="flex items-center justify-between text-neutral-400 text-xs font-medium">
+                  <span>Out of Stock (86'd)</span>
+                  <AlertTriangle className="size-4 text-amber-500" />
+                </div>
+                <p className="mt-2 text-2xl sm:text-3xl font-display font-bold text-neutral-300">
+                  {menuStats.outOfStock}
+                </p>
+                <p className="mt-1 text-[11px] text-neutral-500">Temporarily unavailable</p>
+              </div>
+            </section>
+
+            {/* Menu Filter & Search Toolbar */}
+            <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-4 flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-3">
+              <div className="relative flex-1 max-w-md">
+                <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 size-4 text-neutral-500" />
+                <Input
+                  type="text"
+                  value={menuSearch}
+                  onChange={(e) => setMenuSearch(e.target.value)}
+                  placeholder="Search dishes by name or description…"
+                  className="bg-neutral-950 border-neutral-800 text-neutral-100 placeholder:text-neutral-600 pl-10 text-xs h-10"
+                />
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                {/* Category dropdown */}
+                <select
+                  value={selectedCategory}
+                  onChange={(e) => setSelectedCategory(e.target.value)}
+                  className="rounded-xl bg-neutral-950 border border-neutral-800 text-neutral-300 text-xs px-3 py-2 focus:outline-none focus:border-amber-500"
+                >
+                  <option value="all">All Categories ({menuItems.length})</option>
+                  {allCategories.map((cat) => (
+                    <option key={cat} value={cat}>
+                      {cat} ({menuItems.filter((i) => i.category === cat).length})
+                    </option>
+                  ))}
+                </select>
+
+                {/* Dietary Filter Pills */}
+                <div className="flex items-center rounded-xl bg-neutral-950 p-1 border border-neutral-800 text-xs">
+                  <button
+                    type="button"
+                    onClick={() => setVegFilter("all")}
+                    className={`px-3 py-1.5 rounded-lg transition-colors font-medium ${
+                      vegFilter === "all"
+                        ? "bg-amber-600 text-neutral-950 font-bold"
+                        : "text-neutral-400 hover:text-white"
+                    }`}
+                  >
+                    All
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setVegFilter("veg")}
+                    className={`px-3 py-1.5 rounded-lg transition-colors font-medium flex items-center gap-1 ${
+                      vegFilter === "veg"
+                        ? "bg-emerald-600 text-neutral-950 font-bold"
+                        : "text-neutral-400 hover:text-white"
+                    }`}
+                  >
+                    <span className="size-1.5 rounded-full bg-emerald-400"></span> Veg
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setVegFilter("non-veg")}
+                    className={`px-3 py-1.5 rounded-lg transition-colors font-medium flex items-center gap-1 ${
+                      vegFilter === "non-veg"
+                        ? "bg-rose-600 text-neutral-950 font-bold"
+                        : "text-neutral-400 hover:text-white"
+                    }`}
+                  >
+                    <span className="size-1.5 rounded-full bg-rose-400"></span> Non-Veg
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setVegFilter("alcoholic")}
+                    className={`px-3 py-1.5 rounded-lg transition-colors font-medium flex items-center gap-1 ${
+                      vegFilter === "alcoholic"
+                        ? "bg-amber-600 text-neutral-950 font-bold"
+                        : "text-neutral-400 hover:text-white"
+                    }`}
+                  >
+                    🍷 18+
+                  </button>
+                </div>
+
+                <span className="text-xs text-neutral-500 font-medium px-2">
+                  {filteredMenuItems.length} items
+                </span>
+              </div>
+            </section>
+
+            {/* Menu Items Table */}
+            <section className="rounded-2xl border border-neutral-800 bg-neutral-900/60 overflow-hidden shadow-xl">
+              <div className="border-b border-neutral-800 px-6 py-4 flex items-center justify-between">
+                <div>
+                  <h2 className="font-display font-semibold text-base text-neutral-200">
+                    Menu Items & Live Pricing ({filteredMenuItems.length})
+                  </h2>
+                  <p className="text-xs text-neutral-500 mt-0.5">
+                    Price changes sync instantly across Customer Menu, Pre-orders, and KDS
+                  </p>
+                </div>
+              </div>
+
+              {filteredMenuItems.length === 0 ? (
+                <div className="p-12 text-center text-neutral-500 text-sm">
+                  No menu items found matching "{menuSearch}".
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-xs">
+                    <thead className="bg-neutral-950/70 border-b border-neutral-800 text-neutral-400 uppercase tracking-wider text-[11px]">
+                      <tr>
+                        <th className="px-5 py-3.5 font-semibold">Photo</th>
+                        <th className="px-5 py-3.5 font-semibold">Item & Details</th>
+                        <th className="px-5 py-3.5 font-semibold">Category</th>
+                        <th className="px-5 py-3.5 font-semibold">Dietary & Age</th>
+                        <th className="px-5 py-3.5 font-semibold">Stock Status</th>
+                        <th className="px-5 py-3.5 font-semibold text-right">Price (₹ INR)</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-neutral-800/60 text-neutral-200">
+                      {filteredMenuItems.map((item) => {
+                        const draftVal =
+                          priceDrafts[item.id] !== undefined
+                            ? priceDrafts[item.id]
+                            : String(item.price);
+                        const isDirty =
+                          priceDrafts[item.id] !== undefined &&
+                          priceDrafts[item.id] !== String(item.price);
+                        const isSaving = savingPriceId === item.id;
+
+                        return (
+                          <tr key={item.id} className="hover:bg-neutral-800/40 transition-colors">
+                            {/* Photo Thumbnail */}
+                            <td className="px-5 py-3.5 whitespace-nowrap">
+                              <div className="relative size-14 rounded-xl overflow-hidden border border-neutral-800 bg-neutral-950 flex items-center justify-center shrink-0 shadow-sm">
+                                <img
+                                  src={item.image || "/uploads/menu/placeholder.webp"}
+                                  alt={item.name}
+                                  onError={(e) => {
+                                    (e.currentTarget as HTMLImageElement).src =
+                                      "/uploads/menu/placeholder.webp";
+                                  }}
+                                  className="size-full object-cover"
+                                  loading="lazy"
+                                />
+                                {item.isAlcoholic && (
+                                  <span className="absolute top-1 right-1 bg-neutral-950/90 text-amber-400 text-[9px] font-bold px-1 rounded border border-amber-500/40">
+                                    18+
+                                  </span>
+                                )}
+                              </div>
+                            </td>
+
+                            {/* Name & Details */}
+                            <td className="px-5 py-3.5">
+                              <div className="font-semibold text-white text-sm flex items-center gap-2">
+                                <span>{item.name}</span>
+                                {item.tag && (
+                                  <span className="text-[10px] bg-amber-500/10 text-amber-400 border border-amber-500/20 px-1.5 py-0.5 rounded font-normal">
+                                    {item.tag}
+                                  </span>
+                                )}
+                              </div>
+                              <p className="text-neutral-400 text-[11px] line-clamp-1 mt-0.5 max-w-xs">
+                                {item.description || "Freshly handcrafted"}
+                              </p>
+                              <span className="text-[10px] text-neutral-500 flex items-center gap-1 mt-1">
+                                <Clock className="size-2.5" /> Prep: {item.prepTimeMinutes || 10} min
+                              </span>
+                            </td>
+
+                            {/* Category */}
+                            <td className="px-5 py-3.5 whitespace-nowrap">
+                              <Badge
+                                variant="outline"
+                                className="border-neutral-700 bg-neutral-800/80 text-neutral-300 text-[11px]"
+                              >
+                                {item.category}
+                              </Badge>
+                            </td>
+
+                            {/* Dietary & Age Badges */}
+                            <td className="px-5 py-3.5 whitespace-nowrap">
+                              <div className="flex flex-col gap-1 items-start">
+                                {item.isVeg ? (
+                                  <span className="inline-flex items-center gap-1 text-[10px] font-medium text-emerald-400 bg-emerald-950/40 border border-emerald-500/30 px-2 py-0.5 rounded-full">
+                                    <span className="size-1.5 rounded-full bg-emerald-400"></span> Veg
+                                  </span>
+                                ) : (
+                                  <span className="inline-flex items-center gap-1 text-[10px] font-medium text-rose-400 bg-rose-950/40 border border-rose-500/30 px-2 py-0.5 rounded-full">
+                                    <span className="size-1.5 rounded-full bg-rose-400"></span> Non-Veg
+                                  </span>
+                                )}
+
+                                {item.isAlcoholic && (
+                                  <span className="inline-flex items-center gap-1 text-[10px] font-bold text-amber-300 bg-amber-950/60 border border-amber-500/40 px-2 py-0.5 rounded-full">
+                                    🍷 18+ Alcoholic
+                                  </span>
+                                )}
+                              </div>
+                            </td>
+
+                            {/* Stock Status Toggle */}
+                            <td className="px-5 py-3.5 whitespace-nowrap">
+                              <button
+                                type="button"
+                                onClick={() => handleToggleItemAvailability(item)}
+                                className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition-all border ${
+                                  item.isAvailable
+                                    ? "bg-emerald-950/40 text-emerald-300 border-emerald-600/40 hover:bg-emerald-900/40"
+                                    : "bg-red-950/50 text-red-300 border-red-600/40 hover:bg-red-900/40"
+                                }`}
+                              >
+                                {item.isAvailable ? "In Stock" : "86'd / Sold Out"}
+                              </button>
+                            </td>
+
+                            {/* Price & Save Action */}
+                            <td className="px-5 py-3.5 whitespace-nowrap text-right">
+                              <div className="flex items-center justify-end gap-2">
+                                <div className="relative w-24">
+                                  <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-neutral-400 text-xs font-bold">
+                                    ₹
+                                  </span>
+                                  <Input
+                                    type="number"
+                                    min="0"
+                                    step="1"
+                                    value={draftVal}
+                                    onChange={(e) =>
+                                      handlePriceDraftChange(item.id, e.target.value)
+                                    }
+                                    onKeyDown={(e) => {
+                                      if (e.key === "Enter") handleSavePrice(item);
+                                    }}
+                                    className={`pl-6 pr-2 h-9 text-xs font-bold font-mono text-right rounded-xl border ${
+                                      isDirty
+                                        ? "border-amber-500 bg-amber-950/20 text-amber-300"
+                                        : "border-neutral-800 bg-neutral-950 text-white"
+                                    }`}
+                                  />
+                                </div>
+
+                                <Button
+                                  size="sm"
+                                  onClick={() => handleSavePrice(item)}
+                                  disabled={isSaving || !isDirty}
+                                  className={`h-9 px-3 text-xs font-bold rounded-xl transition-all ${
+                                    isDirty
+                                      ? "bg-amber-600 hover:bg-amber-500 text-neutral-950 shadow-md shadow-amber-950/50"
+                                      : "bg-neutral-800 text-neutral-500 border border-neutral-700/50"
+                                  }`}
+                                  title={isDirty ? "Save price change" : "Price matches saved state"}
+                                >
+                                  {isSaving ? (
+                                    <RefreshCw className="size-3.5 animate-spin" />
+                                  ) : isDirty ? (
+                                    <>
+                                      <Save className="size-3.5 mr-1" /> Save
+                                    </>
+                                  ) : (
+                                    <Check className="size-3.5 text-emerald-400" />
+                                  )}
+                                </Button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </section>
+          </div>
+        )}
       </main>
 
       {/* Change Password Dialog Modal */}

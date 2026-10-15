@@ -51,6 +51,7 @@ import {
 } from "@/lib/kitchen.sync";
 import { getOutOfStockItemIds, toggleItemStock } from "@/lib/stock";
 import { menu as rawMenu, categories as rawCategories, type MenuItem } from "@/data/menu";
+import { getStoredMenu } from "@/lib/menu";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -87,6 +88,8 @@ function KitchenDashboardPage() {
   const [showStockModal, setShowStockModal] = useState(false);
   const [stockItemIds, setStockItemIds] = useState<string[]>([]);
   const [stockSearch, setStockSearch] = useState("");
+  const [liveMenu, setLiveMenu] = useState<MenuItem[]>(() => getStoredMenu());
+  const menuMap = useMemo(() => new Map<string, MenuItem>(liveMenu.map((m) => [m.id, m])), [liveMenu]);
 
   // Reject modal state
   const [rejectingOrder, setRejectingOrder] = useState<BookingInput | null>(null);
@@ -253,19 +256,57 @@ function KitchenDashboardPage() {
     const cat = (item.category || "").toLowerCase();
 
     if (station === "Beverages") {
-      return cat.includes("coffee") || cat.includes("drinks") || name.includes("latte") || name.includes("cappuccino") || name.includes("brew");
+      return (
+        cat.includes("beverage") ||
+        cat.includes("coffee") ||
+        cat.includes("tea") ||
+        cat.includes("drink") ||
+        name.includes("latte") ||
+        name.includes("cappuccino") ||
+        name.includes("brew") ||
+        name.includes("shake") ||
+        name.includes("smoothie")
+      );
     }
     if (station === "Momos") {
-      return name.includes("momo") || name.includes("dumpling") || cat.includes("bowls");
+      return cat.includes("momo") || name.includes("momo") || name.includes("dumpling");
     }
     if (station === "Fast Food") {
-      return name.includes("burger") || name.includes("pizza") || name.includes("fries") || name.includes("sandwich") || cat.includes("mains") || cat.includes("bites");
+      return (
+        cat.includes("snack") ||
+        cat.includes("starter") ||
+        cat.includes("burger") ||
+        cat.includes("sandwich") ||
+        cat.includes("pizza") ||
+        cat.includes("pasta") ||
+        cat.includes("mains") ||
+        cat.includes("bites") ||
+        name.includes("fries") ||
+        name.includes("nachos")
+      );
     }
     if (station === "Desserts") {
-      return cat.includes("bakery") || cat.includes("desserts") || name.includes("brownie") || name.includes("croissant");
+      return (
+        cat.includes("dessert") ||
+        cat.includes("bakery") ||
+        name.includes("brownie") ||
+        name.includes("cake") ||
+        name.includes("waffle") ||
+        name.includes("pie") ||
+        name.includes("scoop")
+      );
     }
     if (station === "Cocktails") {
-      return name.includes("matcha") || name.includes("tonic") || name.includes("cocktail") || name.includes("mocktail") || name.includes("chocolate");
+      return (
+        cat.includes("cocktail") ||
+        cat.includes("mocktail") ||
+        name.includes("mojito") ||
+        name.includes("margarita") ||
+        name.includes("sangria") ||
+        name.includes("punch") ||
+        name.includes("cooler") ||
+        name.includes("fizz")
+      );
     }
     return true;
   };
@@ -830,7 +871,7 @@ function KitchenDashboardPage() {
 
             {/* List of items */}
             <div className="flex-1 overflow-y-auto space-y-2 pr-1">
-              {rawMenu
+              {liveMenu
                 .filter((m) => !stockSearch || m.name.toLowerCase().includes(stockSearch.toLowerCase()))
                 .map((dish) => {
                   const isOutOfStock = stockItemIds.includes(dish.id);
@@ -843,13 +884,21 @@ function KitchenDashboardPage() {
                           : "bg-neutral-950/60 border-neutral-800 hover:border-neutral-700"
                       }`}
                     >
-                      <div className="flex items-center gap-3">
-                        <span className="size-2 rounded-full" style={{ backgroundColor: isOutOfStock ? "#f43f5e" : "#10b981" }} />
-                        <div>
-                          <p className={`text-sm font-semibold ${isOutOfStock ? "line-through text-neutral-400" : "text-neutral-100"}`}>
+                      <div className="flex items-center gap-3 min-w-0">
+                        <img
+                          src={dish.image || "/uploads/menu/placeholder.webp"}
+                          alt={dish.name}
+                          onError={(e) => {
+                            e.currentTarget.src = "/uploads/menu/placeholder.webp";
+                          }}
+                          className="size-10 rounded-xl object-cover shrink-0 border border-neutral-800 bg-neutral-900"
+                        />
+                        <span className="size-2 rounded-full shrink-0" style={{ backgroundColor: isOutOfStock ? "#f43f5e" : "#10b981" }} />
+                        <div className="min-w-0">
+                          <p className={`text-sm font-semibold truncate ${isOutOfStock ? "line-through text-neutral-400" : "text-neutral-100"}`}>
                             {dish.name}
                           </p>
-                          <span className="text-[11px] text-neutral-500">{dish.category} • ₹{Math.round(dish.price * 20)}</span>
+                          <span className="text-[11px] text-neutral-500">{dish.category} • ₹{dish.price}</span>
                         </div>
                       </div>
 
@@ -1078,9 +1127,9 @@ function KitchenDashboardPage() {
                       : "bg-neutral-800/40 border-neutral-700/60 text-neutral-100 hover:bg-neutral-800"
                   }`}
                 >
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2.5 min-w-0">
                     <div
-                      className={`size-4 rounded-md border flex items-center justify-center transition-colors ${
+                      className={`size-4 rounded-md border flex items-center justify-center shrink-0 transition-colors ${
                         isItemDone
                           ? "bg-emerald-600 border-emerald-500 text-white"
                           : "border-neutral-600 bg-neutral-900"
@@ -1088,10 +1137,26 @@ function KitchenDashboardPage() {
                     >
                       {isItemDone && <Check className="size-3 stroke-[3]" />}
                     </div>
-                    <span className={`font-medium ${isItemDone ? "line-through" : ""}`}>
-                      <strong className="text-orange-400 font-mono mr-1.5">{item.qty}x</strong>
-                      {item.name}
-                    </span>
+                    {/* Item Image Thumbnail on KDS Card */}
+                    <img
+                      src={
+                        item.image ||
+                        menuMap.get(item.id)?.image ||
+                        liveMenu.find((m) => m.name.toLowerCase() === item.name.toLowerCase())?.image ||
+                        "/uploads/menu/placeholder.webp"
+                      }
+                      alt={item.name}
+                      onError={(e) => {
+                        e.currentTarget.src = "/uploads/menu/placeholder.webp";
+                      }}
+                      className="size-8 rounded-lg object-cover shrink-0 border border-neutral-700 bg-neutral-900"
+                    />
+                    <div className="min-w-0">
+                      <span className={`font-medium block truncate ${isItemDone ? "line-through opacity-60" : ""}`}>
+                        <strong className="text-orange-400 font-mono mr-1.5">{item.qty}x</strong>
+                        {item.name}
+                      </span>
+                    </div>
                   </div>
 
                   <span className="text-[10px] text-neutral-500 font-mono">

@@ -15,16 +15,19 @@ import {
   Info,
   RotateCcw,
   QrCode,
-  Banknote,
   CheckCircle2,
+  ShieldAlert,
+  Wine,
+  AlertCircle,
 } from "lucide-react";
 import { toast } from "sonner";
 import { useQuery } from "@tanstack/react-query";
 import QRCode from "react-qr-code";
 
-import { categories as categoriesRaw, menu as menuRaw, tableTypes as tableTypesRaw } from "@/data/menu";
+import { categories as categoriesRaw, menu as menuRaw, tableTypes as tableTypesRaw, type MenuItem } from "@/data/menu";
 import { getOutOfStockItemIds } from "@/lib/stock";
 import { subscribeToKitchenEvents } from "@/lib/kitchen.sync";
+import { getStoredMenu, isCocktailsCategoryHidden, subscribeToMenuUpdates } from "@/lib/menu";
 
 const categories = categoriesRaw ?? [];
 const menu = menuRaw ?? [];
@@ -119,7 +122,7 @@ const occasions = [
   { value: "Celebration", label: "Celebration" },
 ];
 
-const inr = (usd: number) => Math.round(usd * 20);
+const inr = (val: number) => Math.round(val);
 const today = () => new Date().toISOString().slice(0, 10);
 const genCode = () => `CQ-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
 
@@ -140,17 +143,6 @@ function ReservePage() {
   const search = Route.useSearch();
   const navigate = useNavigate();
   const { user, isAuthenticated, isLoading: authLoading } = useAuth();
-  const [outOfStockIds, setOutOfStockIds] = useState<string[]>([]);
-
-  useEffect(() => {
-    setOutOfStockIds(getOutOfStockItemIds());
-    const unsubscribe = subscribeToKitchenEvents((event) => {
-      if (event.type === "STOCK_CHANGED") {
-        setOutOfStockIds(getOutOfStockItemIds());
-      }
-    });
-    return unsubscribe;
-  }, []);
 
   const [date, setDate] = useState(today());
   const [time, setTime] = useState("09:00");
@@ -183,9 +175,52 @@ function ReservePage() {
     }
   }, [user]);
 
+  // Menu items & real-time sync
+  const [menuItems, setMenuItems] = useState<MenuItem[]>(() => getStoredMenu());
+  const [outOfStockIds, setOutOfStockIds] = useState<string[]>(() => getOutOfStockItemIds());
+  const [hideCocktails, setHideCocktails] = useState<boolean>(() => isCocktailsCategoryHidden());
+  const [ageConfirmItem, setAgeConfirmItem] = useState<MenuItem | null>(null);
+  const [ageConfirmed, setAgeConfirmed] = useState(false);
+
+  useEffect(() => {
+    const refresh = () => {
+      setMenuItems(getStoredMenu());
+      setOutOfStockIds(getOutOfStockItemIds());
+      setHideCocktails(isCocktailsCategoryHidden());
+    };
+    refresh();
+    const unsubMenu = subscribeToMenuUpdates(refresh);
+    const unsubKitchen = subscribeToKitchenEvents((event) => {
+      if (event.type === "STOCK_CHANGED") {
+        setOutOfStockIds(getOutOfStockItemIds());
+      }
+    });
+    return () => {
+      unsubMenu();
+      unsubKitchen();
+    };
+  }, []);
+
+  const availableCategories = useMemo(() => {
+    const distinct = Array.from(new Set(menuItems.map((m) => m.category)));
+    return distinct.filter((cat) => {
+      if (hideCocktails && (cat.toLowerCase().includes("cocktail") || cat.includes("18+"))) {
+        return false;
+      }
+      return true;
+    });
+  }, [menuItems, hideCocktails]);
+
   // Merged flow toggle
   const [wantFoodOnArrival, setWantFoodOnArrival] = useState(true);
-  const [activeCategoryTab, setActiveCategoryTab] = useState<string>(categories?.[0] ?? "");
+  const [activeCategoryTab, setActiveCategoryTab] = useState<string>("Hot Beverages");
+
+  // Keep active category tab valid if categories change
+  useEffect(() => {
+    if (availableCategories.length > 0 && !availableCategories.includes(activeCategoryTab)) {
+      setActiveCategoryTab(availableCategories[0]);
+    }
+  }, [availableCategories, activeCategoryTab]);
 
   // Cart
   const [cart, setCart] = useState<Record<string, CartItemState>>({});
@@ -257,7 +292,7 @@ function ReservePage() {
     return Object.entries(cart)
       .filter(([_, state]) => state.qty > 0)
       .map(([id, state]) => {
-        const menuItem = menu.find((m) => m.id === id);
+        const menuItem = menuItems.find((m) => m.id === id);
         return {
           id,
           name: menuItem ? menuItem.name : id,
@@ -265,9 +300,11 @@ function ReservePage() {
           price: menuItem ? inr(menuItem.price) : 0,
           prepTimeMinutes: menuItem ? menuItem.prepTimeMinutes : 5,
           fulfillment: state.fulfillment,
+          category: menuItem?.category,
+          image: menuItem?.image || "/uploads/menu/placeholder.webp",
         };
       });
-  }, [cart, wantFoodOnArrival]);
+  }, [cart, wantFoodOnArrival, menuItems]);
 
   const preOrderedItems = useMemo(() => items.filter((i) => i.fulfillment === "pre_ordered"), [items]);
   const atTableItems = useMemo(() => items.filter((i) => i.fulfillment === "at_table"), [items]);
@@ -303,6 +340,12 @@ function ReservePage() {
   };
 
   const changeQty = (id: string, delta: number) => {
+    const item = menuItems.find((m) => m.id === id);
+    if (delta > 0 && item?.isAlcoholic && (!cart[id] || cart[id].qty === 0) && !ageConfirmed) {
+      setAgeConfirmItem(item);
+      return;
+    }
+
     setCart((prev) => {
       const current = prev[id] || { qty: 0, fulfillment: "pre_ordered" };
       const nextQty = Math.max(0, current.qty + delta);
@@ -311,6 +354,19 @@ function ReservePage() {
       else copy[id] = { ...current, qty: nextQty };
       return copy;
     });
+  };
+
+  const handleConfirmAgeAndAdd = () => {
+    if (ageConfirmItem) {
+      setAgeConfirmed(true);
+      const id = ageConfirmItem.id;
+      setCart((prev) => {
+        const current = prev[id] || { qty: 0, fulfillment: "pre_ordered" };
+        return { ...prev, [id]: { ...current, qty: current.qty + 1 } };
+      });
+      setAgeConfirmItem(null);
+      toast.success("Age verified: 18+ beverage added to order");
+    }
   };
 
   const toggleFulfillment = (id: string) => {
@@ -808,7 +864,7 @@ function ReservePage() {
                 )}
 
                 <div className="flex gap-2 overflow-x-auto pb-2 scrollbar-none border-b border-border/70">
-                  {categories.map((cat) => (
+                  {availableCategories.map((cat) => (
                     <button
                       key={cat}
                       type="button"
@@ -825,7 +881,7 @@ function ReservePage() {
                 </div>
 
                 <div className="grid gap-3">
-                  {menu
+                  {menuItems
                     .filter((m) => m.category === activeCategoryTab && !outOfStockIds.includes(m.id))
                     .map((item) => {
                       const itemCartState = cart[item.id];
@@ -838,16 +894,29 @@ function ReservePage() {
                           className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 rounded-xl border border-border/70 bg-card p-3.5 shadow-xs hover:border-accent/40 transition-colors"
                         >
                           <div className="flex items-center gap-3 min-w-0">
-                            {item.image && (
-                              <img
-                                src={item.image}
-                                alt={item.name}
-                                className="size-16 rounded-lg object-cover shrink-0"
-                              />
-                            )}
+                            <img
+                              src={item.image || "/uploads/menu/placeholder.webp"}
+                              alt={item.name}
+                              loading="lazy"
+                              onError={(e) => {
+                                e.currentTarget.src = "/uploads/menu/placeholder.webp";
+                              }}
+                              className="size-16 rounded-xl object-cover shrink-0 border border-border/60"
+                            />
                             <div className="min-w-0">
-                              <div className="flex items-center gap-2">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <span
+                                  className={`size-2.5 rounded-full border inline-block shrink-0 ${
+                                    item.isVeg ? "bg-emerald-500 border-emerald-600" : "bg-rose-500 border-rose-600"
+                                  }`}
+                                  title={item.isVeg ? "Vegetarian" : "Non-Vegetarian"}
+                                />
                                 <h4 className="font-medium text-sm text-foreground truncate">{item.name}</h4>
+                                {item.isAlcoholic && (
+                                  <Badge className="bg-rose-600 text-white text-[9px] px-1 py-0 font-bold flex items-center gap-0.5">
+                                    <Wine className="size-2.5" /> 18+
+                                  </Badge>
+                                )}
                                 {item.tag && (
                                   <Badge variant="secondary" className="text-[10px] font-normal px-1.5 py-0">
                                     {item.tag}
@@ -1149,6 +1218,60 @@ function ReservePage() {
         </aside>
       </div>
     </form>
+
+    {/* ─── 18+ Cocktail Age Confirmation Modal ─── */}
+    {ageConfirmItem && (
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in">
+        <div className="w-full max-w-md bg-card border border-border rounded-3xl p-6 shadow-2xl relative text-card-foreground">
+          <div className="flex items-center gap-3 pb-3 border-b border-border">
+            <div className="size-11 rounded-2xl bg-rose-500/20 text-rose-500 flex items-center justify-center shrink-0">
+              <ShieldAlert className="size-6" />
+            </div>
+            <div>
+              <h3 className="font-bold text-lg font-display">Age Verification Required</h3>
+              <p className="text-xs text-muted-foreground">
+                Item: <strong className="text-foreground">{ageConfirmItem.name} (₹{ageConfirmItem.price})</strong>
+              </p>
+            </div>
+          </div>
+
+          <div className="my-4 space-y-3 text-xs sm:text-sm text-muted-foreground leading-relaxed">
+            <p>
+              This item is an <strong>alcoholic beverage</strong> and is strictly restricted to guests aged <strong>18 years or older</strong>.
+            </p>
+            <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-600 dark:text-amber-400 text-xs flex items-start gap-2">
+              <AlertCircle className="size-4 shrink-0 mt-0.5" />
+              <span>
+                Please ensure you have a valid government-issued photo ID to present to staff upon seating.
+              </span>
+            </div>
+            <p className="font-medium text-foreground">
+              Do you confirm that you are 18 years of age or older?
+            </p>
+          </div>
+
+          <div className="pt-3 border-t border-border flex items-center justify-end gap-2">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={() => setAgeConfirmItem(null)}
+              className="text-xs text-muted-foreground hover:text-foreground"
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              onClick={handleConfirmAgeAndAdd}
+              className="text-xs bg-rose-600 hover:bg-rose-500 text-white font-semibold"
+            >
+              <Check className="size-3.5 mr-1" /> Yes, I Am 18+
+            </Button>
+          </div>
+        </div>
+      </div>
+    )}
     </>
   );
 }

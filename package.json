@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "seed:admin": "tsx scripts/seed-admin.ts",
     "seed:kitchen": "tsx scripts/seed-kitchen.ts",
+    "seed:menu": "tsx scripts/seed-menu.ts",
     "test": "tsx tests/kitchen-kds.test.ts"
   },
   "dependencies": {
@@ -73,6 +74,7 @@
     "@types/react": "^19.0.10",
     "@types/react-dom": "^19.0.4",
     "@vitejs/plugin-react": "^4.3.4",
+    "sharp": "^0.35.5",
     "typescript": "^5.7.3",
     "vite": "^6.1.1"
   }
