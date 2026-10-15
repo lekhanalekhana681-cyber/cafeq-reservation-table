@@ -23,9 +23,22 @@ import {
   Lock,
   X,
   AlertCircle,
+  ChefHat,
+  UserPlus,
+  Power,
+  Key,
 } from "lucide-react";
 import { toast } from "sonner";
-import { getCurrentAdmin, logoutAdmin, changeAdminPassword, type User } from "@/lib/auth";
+import {
+  getCurrentAdmin,
+  logoutAdmin,
+  changeAdminPassword,
+  getKitchenStaffUsers,
+  createKitchenStaffAccount,
+  toggleKitchenStaffStatus,
+  resetKitchenStaffPassword,
+  type User,
+} from "@/lib/auth";
 import {
   getAllBookings,
   updateBookingStatus,
@@ -60,6 +73,16 @@ function AdminDashboardPage() {
   const [passwordError, setPasswordError] = useState<string | null>(null);
   const [passwordSuccess, setPasswordSuccess] = useState<string | null>(null);
 
+  // Manage Kitchen Staff modal state
+  const [showKitchenModal, setShowKitchenModal] = useState(false);
+  const [kitchenStaff, setKitchenStaff] = useState<User[]>([]);
+  const [newStaffUsername, setNewStaffUsername] = useState("");
+  const [newStaffName, setNewStaffName] = useState("");
+  const [newStaffPassword, setNewStaffPassword] = useState("");
+  const [creatingStaff, setCreatingStaff] = useState(false);
+  const [resettingUser, setResettingUser] = useState<User | null>(null);
+  const [resetStaffPasswordInput, setResetStaffPasswordInput] = useState("");
+
   // Filters
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("all");
@@ -78,7 +101,72 @@ function AdminDashboardPage() {
     }
     setAdmin(current);
     loadBookings();
+    loadKitchenStaff();
   }, [navigate]);
+
+  const loadKitchenStaff = () => {
+    try {
+      const staff = getKitchenStaffUsers();
+      setKitchenStaff(staff);
+    } catch {
+      // Ignore
+    }
+  };
+
+  const handleCreateKitchenStaff = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newStaffUsername.trim() || !newStaffName.trim() || !newStaffPassword) {
+      toast.error("Please fill in username, full name, and initial password.");
+      return;
+    }
+    setCreatingStaff(true);
+    try {
+      const res = await createKitchenStaffAccount({
+        username: newStaffUsername,
+        name: newStaffName,
+        password: newStaffPassword,
+      });
+      if (res.success) {
+        toast.success(`Kitchen staff account created for @${newStaffUsername}`);
+        setNewStaffUsername("");
+        setNewStaffName("");
+        setNewStaffPassword("");
+        loadKitchenStaff();
+      } else {
+        toast.error(res.error || "Failed to create kitchen account.");
+      }
+    } catch {
+      toast.error("Failed to create kitchen account.");
+    } finally {
+      setCreatingStaff(false);
+    }
+  };
+
+  const handleToggleStaffDisabled = async (userId: string, currentDisabled?: boolean) => {
+    const res = await toggleKitchenStaffStatus(userId, !currentDisabled);
+    if (res.success) {
+      toast.success(currentDisabled ? "Staff account re-enabled" : "Staff account disabled");
+      loadKitchenStaff();
+    } else {
+      toast.error(res.error || "Failed to update staff status.");
+    }
+  };
+
+  const handleResetStaffPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!resettingUser || !resetStaffPasswordInput || resetStaffPasswordInput.length < 6) {
+      toast.error("Password must be at least 6 characters.");
+      return;
+    }
+    const res = await resetKitchenStaffPassword(resettingUser.id, resetStaffPasswordInput);
+    if (res.success) {
+      toast.success(`Password updated for ${resettingUser.name}`);
+      setResettingUser(null);
+      setResetStaffPasswordInput("");
+    } else {
+      toast.error(res.error || "Failed to reset password.");
+    }
+  };
 
   const loadBookings = async () => {
     setRefreshing(true);
@@ -250,6 +338,31 @@ function AdminDashboardPage() {
           </div>
 
           <div className="flex items-center gap-2.5">
+            {/* Shortcut to Kitchen Display System */}
+            <Button
+              asChild
+              variant="outline"
+              size="sm"
+              className="text-xs bg-orange-950/30 border-orange-600/40 text-orange-400 hover:text-orange-300 hover:bg-orange-900/40"
+            >
+              <Link to="/kitchen">
+                <ChefHat className="size-3.5 mr-1.5" /> Kitchen KDS
+              </Link>
+            </Button>
+
+            {/* Manage Kitchen Staff */}
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                loadKitchenStaff();
+                setShowKitchenModal(true);
+              }}
+              className="text-xs bg-neutral-900 border-neutral-700 text-neutral-200 hover:text-white hover:bg-neutral-800"
+            >
+              <Users className="size-3.5 mr-1.5 text-orange-400" /> Manage Kitchen Staff
+            </Button>
+
             <Button
               variant="outline"
               size="sm"
@@ -761,6 +874,192 @@ function AdminDashboardPage() {
                   className="bg-amber-600 hover:bg-amber-500 text-neutral-950 font-bold px-5 text-xs shadow-md shadow-amber-950/40"
                 >
                   {changingPassword ? "Updating…" : "Save Password"}
+                </Button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ─── Manage Kitchen Staff Modal ─── */}
+      {showKitchenModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-in fade-in">
+          <div className="w-full max-w-2xl bg-neutral-900 border border-neutral-800 rounded-3xl p-6 shadow-2xl relative max-h-[90vh] flex flex-col">
+            <div className="flex items-center justify-between pb-4 border-b border-neutral-800">
+              <div className="flex items-center gap-2.5">
+                <div className="size-9 rounded-xl bg-orange-500/10 border border-orange-500/30 text-orange-400 flex items-center justify-center">
+                  <ChefHat className="size-5" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-base text-neutral-100">Manage Kitchen Staff Accounts</h3>
+                  <p className="text-xs text-neutral-400">
+                    Create kitchen logins, toggle active/disabled status, and reset staff passwords.
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowKitchenModal(false)}
+                className="text-neutral-400 hover:text-white p-1 rounded-lg"
+              >
+                <X className="size-5" />
+              </button>
+            </div>
+
+            {/* List of existing staff */}
+            <div className="my-4 flex-1 overflow-y-auto space-y-2.5 pr-1">
+              <h4 className="text-xs font-semibold uppercase tracking-wider text-neutral-400">
+                Active & Registered Staff ({kitchenStaff.length})
+              </h4>
+              {kitchenStaff.length === 0 ? (
+                <div className="p-4 text-center text-xs text-neutral-500 border border-neutral-800 rounded-2xl">
+                  No kitchen staff accounts registered yet.
+                </div>
+              ) : (
+                kitchenStaff.map((staff) => (
+                  <div
+                    key={staff.id}
+                    className="flex items-center justify-between p-3 rounded-2xl border border-neutral-800 bg-neutral-950/60"
+                  >
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="font-semibold text-sm text-neutral-100">{staff.name}</span>
+                        <Badge
+                          variant="outline"
+                          className={`text-[10px] uppercase font-mono px-1.5 py-0 ${
+                            staff.is_disabled
+                              ? "text-rose-400 border-rose-500/40 bg-rose-950/40"
+                              : "text-emerald-400 border-emerald-500/40 bg-emerald-950/40"
+                          }`}
+                        >
+                          {staff.is_disabled ? "Disabled" : "Active"}
+                        </Badge>
+                      </div>
+                      <div className="text-xs text-neutral-400 mt-0.5">
+                        Username: <span className="text-orange-400 font-mono">@{staff.username || "kitchen"}</span> • {staff.email}
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => {
+                          setResettingUser(staff);
+                          setResetStaffPasswordInput("");
+                        }}
+                        className="text-xs h-8 border-neutral-700 bg-neutral-900 text-neutral-300 hover:text-white"
+                      >
+                        <Key className="size-3 mr-1" /> Reset Pass
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant={staff.is_disabled ? "outline" : "destructive"}
+                        onClick={() => handleToggleStaffDisabled(staff.id, staff.is_disabled)}
+                        className="text-xs h-8"
+                      >
+                        <Power className="size-3 mr-1" />
+                        {staff.is_disabled ? "Enable" : "Disable"}
+                      </Button>
+                    </div>
+                  </div>
+                ))
+              )}
+
+              {/* Add New Staff Form */}
+              <div className="mt-5 pt-4 border-t border-neutral-800">
+                <h4 className="text-xs font-semibold uppercase tracking-wider text-orange-400 mb-3 flex items-center gap-1.5">
+                  <UserPlus className="size-3.5" /> Provision New Kitchen Staff Member
+                </h4>
+                <form onSubmit={handleCreateKitchenStaff} className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                  <div>
+                    <Label className="text-[11px] text-neutral-400">Username</Label>
+                    <Input
+                      value={newStaffUsername}
+                      onChange={(e) => setNewStaffUsername(e.target.value)}
+                      placeholder="e.g. chef_john"
+                      className="h-8 text-xs bg-neutral-950 border-neutral-800 text-neutral-200 mt-1"
+                      required
+                    />
+                  </div>
+                  <div>
+                    <Label className="text-[11px] text-neutral-400">Full Name</Label>
+                    <Input
+                      value={newStaffName}
+                      onChange={(e) => setNewStaffName(e.target.value)}
+                      placeholder="e.g. John Doe"
+                      className="h-8 text-xs bg-neutral-950 border-neutral-800 text-neutral-200 mt-1"
+                      required
+                    />
+                  </div>
+                  <div>
+                    <Label className="text-[11px] text-neutral-400">Initial Password</Label>
+                    <Input
+                      type="password"
+                      value={newStaffPassword}
+                      onChange={(e) => setNewStaffPassword(e.target.value)}
+                      placeholder="Min 6 characters"
+                      className="h-8 text-xs bg-neutral-950 border-neutral-800 text-neutral-200 mt-1"
+                      required
+                    />
+                  </div>
+                  <div className="sm:col-span-3 flex justify-end">
+                    <Button
+                      type="submit"
+                      disabled={creatingStaff}
+                      size="sm"
+                      className="h-8 text-xs bg-orange-600 hover:bg-orange-500 text-white"
+                    >
+                      {creatingStaff ? "Creating..." : "Add Kitchen Staff"}
+                    </Button>
+                  </div>
+                </form>
+              </div>
+            </div>
+
+            <div className="pt-3 border-t border-neutral-800 flex justify-end">
+              <Button onClick={() => setShowKitchenModal(false)} className="text-xs bg-neutral-800 hover:bg-neutral-700">
+                Close
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ─── Reset Kitchen Password Sub-Modal ─── */}
+      {resettingUser && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/90 backdrop-blur-md animate-in fade-in">
+          <div className="w-full max-w-sm bg-neutral-900 border border-neutral-800 rounded-3xl p-6 shadow-2xl">
+            <h3 className="font-bold text-base text-neutral-100">Reset Staff Password</h3>
+            <p className="text-xs text-neutral-400 mt-1">
+              Set new password for <span className="text-orange-400 font-semibold">{resettingUser.name}</span> (@{resettingUser.username})
+            </p>
+
+            <form onSubmit={handleResetStaffPassword} className="mt-4 space-y-3">
+              <div>
+                <Label className="text-xs text-neutral-300">New Password</Label>
+                <Input
+                  type="password"
+                  value={resetStaffPasswordInput}
+                  onChange={(e) => setResetStaffPasswordInput(e.target.value)}
+                  placeholder="At least 6 characters"
+                  className="bg-neutral-950 border-neutral-800 text-neutral-200 text-xs h-9 mt-1"
+                  autoFocus
+                  required
+                />
+              </div>
+
+              <div className="pt-3 flex justify-end gap-2">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setResettingUser(null)}
+                  className="text-xs text-neutral-400"
+                >
+                  Cancel
+                </Button>
+                <Button type="submit" size="sm" className="text-xs bg-orange-600 hover:bg-orange-500 text-white">
+                  Save Password
                 </Button>
               </div>
             </form>

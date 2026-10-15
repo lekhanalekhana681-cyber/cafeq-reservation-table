@@ -23,8 +23,8 @@ interface WhatsAppTextPayload {
 }
 
 export async function sendWhatsAppMessage({ to, message }: WhatsAppTextPayload): Promise<boolean> {
-  const apiKey = import.meta.env.VITE_WHATSAPP_API_KEY;
-  const phoneNumberId = import.meta.env.VITE_WHATSAPP_PHONE_NUMBER_ID;
+  const apiKey = (typeof import.meta !== "undefined" && import.meta.env?.VITE_WHATSAPP_API_KEY) || process.env?.VITE_WHATSAPP_API_KEY;
+  const phoneNumberId = (typeof import.meta !== "undefined" && import.meta.env?.VITE_WHATSAPP_PHONE_NUMBER_ID) || process.env?.VITE_WHATSAPP_PHONE_NUMBER_ID;
 
   if (!apiKey || !phoneNumberId) {
     console.info("[notifications] WhatsApp env vars not set — skipping.");
@@ -67,9 +67,9 @@ interface TwilioSmsPayload {
 }
 
 export async function sendSms({ to, message }: TwilioSmsPayload): Promise<boolean> {
-  const sid = import.meta.env.VITE_TWILIO_SID;
-  const authToken = import.meta.env.VITE_TWILIO_AUTH_TOKEN;
-  const from = import.meta.env.VITE_TWILIO_FROM_PHONE;
+  const sid = (typeof import.meta !== "undefined" && import.meta.env?.VITE_TWILIO_SID) || process.env?.VITE_TWILIO_SID;
+  const authToken = (typeof import.meta !== "undefined" && import.meta.env?.VITE_TWILIO_AUTH_TOKEN) || process.env?.VITE_TWILIO_AUTH_TOKEN;
+  const from = (typeof import.meta !== "undefined" && import.meta.env?.VITE_TWILIO_FROM_PHONE) || process.env?.VITE_TWILIO_FROM_PHONE;
 
   if (!sid || !authToken || !from) {
     console.info("[notifications] Twilio env vars not set — skipping.");

@@ -23,6 +23,8 @@ import { useQuery } from "@tanstack/react-query";
 import QRCode from "react-qr-code";
 
 import { categories as categoriesRaw, menu as menuRaw, tableTypes as tableTypesRaw } from "@/data/menu";
+import { getOutOfStockItemIds } from "@/lib/stock";
+import { subscribeToKitchenEvents } from "@/lib/kitchen.sync";
 
 const categories = categoriesRaw ?? [];
 const menu = menuRaw ?? [];
@@ -138,6 +140,17 @@ function ReservePage() {
   const search = Route.useSearch();
   const navigate = useNavigate();
   const { user, isAuthenticated, isLoading: authLoading } = useAuth();
+  const [outOfStockIds, setOutOfStockIds] = useState<string[]>([]);
+
+  useEffect(() => {
+    setOutOfStockIds(getOutOfStockItemIds());
+    const unsubscribe = subscribeToKitchenEvents((event) => {
+      if (event.type === "STOCK_CHANGED") {
+        setOutOfStockIds(getOutOfStockItemIds());
+      }
+    });
+    return unsubscribe;
+  }, []);
 
   const [date, setDate] = useState(today());
   const [time, setTime] = useState("09:00");
@@ -813,7 +826,7 @@ function ReservePage() {
 
                 <div className="grid gap-3">
                   {menu
-                    .filter((m) => m.category === activeCategoryTab)
+                    .filter((m) => m.category === activeCategoryTab && !outOfStockIds.includes(m.id))
                     .map((item) => {
                       const itemCartState = cart[item.id];
                       const qty = itemCartState?.qty || 0;

@@ -1,5 +1,5 @@
 import { Link, useNavigate } from "@tanstack/react-router";
-import { Coffee, LogOut, User as UserIcon, Menu as MenuIcon, X, CalendarCheck, ShieldCheck } from "lucide-react";
+import { Coffee, LogOut, User as UserIcon, Menu as MenuIcon, X, CalendarCheck, ShieldCheck, ChefHat } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { useAuth } from "@/context/AuthContext";
@@ -74,7 +74,17 @@ export function SiteHeader() {
                 <Button asChild size="sm" variant="outline" className="text-xs border-amber-600/40 text-amber-700 dark:text-amber-400 bg-amber-500/10 hover:bg-amber-500/20">
                   <Link to="/admin" className="flex items-center gap-1.5">
                     <ShieldCheck className="size-3.5 text-amber-600 dark:text-amber-400" />
-                    <span>Admin Dashboard</span>
+                    <span>Admin</span>
+                  </Link>
+                </Button>
+              )}
+
+              {/* If admin or kitchen staff, show shortcut to Kitchen KDS */}
+              {(user.role === "kitchen" || user.role === "admin") && (
+                <Button asChild size="sm" variant="outline" className="text-xs border-orange-600/40 text-orange-700 dark:text-orange-400 bg-orange-500/10 hover:bg-orange-500/20">
+                  <Link to="/kitchen" className="flex items-center gap-1.5">
+                    <ChefHat className="size-3.5 text-orange-600 dark:text-orange-400" />
+                    <span>Kitchen KDS</span>
                   </Link>
                 </Button>
               )}
@@ -116,7 +126,20 @@ export function SiteHeader() {
               >
                 <Link to="/admin/login" className="flex items-center gap-1.5">
                   <ShieldCheck className="size-3.5 text-amber-600 dark:text-amber-400" />
-                  <span>Admin Login</span>
+                  <span>Admin</span>
+                </Link>
+              </Button>
+
+              {/* Kitchen Login link */}
+              <Button
+                asChild
+                variant="outline"
+                size="sm"
+                className="text-xs border-orange-600/40 text-orange-700 dark:text-orange-400 bg-orange-500/10 hover:bg-orange-500/20 font-medium"
+              >
+                <Link to="/kitchen/login" className="flex items-center gap-1.5">
+                  <ChefHat className="size-3.5 text-orange-600 dark:text-orange-400" />
+                  <span>Kitchen</span>
                 </Link>
               </Button>
             </div>

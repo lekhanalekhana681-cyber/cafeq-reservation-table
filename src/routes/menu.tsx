@@ -1,16 +1,31 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
+import { useState, useEffect } from "react";
 
 import menuSpread from "@/assets/menu-spread.jpg";
 import { categories, menu } from "@/data/menu";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { PageBackground } from "@/components/PageBackground";
+import { getOutOfStockItemIds } from "@/lib/stock";
+import { subscribeToKitchenEvents } from "@/lib/kitchen.sync";
 
 export const Route = createFileRoute("/menu")({
   component: MenuPage,
 });
 
 function MenuPage() {
+  const [outOfStockIds, setOutOfStockIds] = useState<string[]>([]);
+
+  useEffect(() => {
+    setOutOfStockIds(getOutOfStockItemIds());
+    const unsubscribe = subscribeToKitchenEvents((event) => {
+      if (event.type === "STOCK_CHANGED") {
+        setOutOfStockIds(getOutOfStockItemIds());
+      }
+    });
+    return unsubscribe;
+  }, []);
+
   return (
     <>
       <PageBackground imageUrl={menuSpread} />
@@ -28,7 +43,8 @@ function MenuPage() {
 
       <div className="mx-auto max-w-6xl px-5 py-16 relative z-10 bg-background/80 backdrop-blur-md rounded-3xl mt-8 mb-12 border border-border/50">
         {categories.map((cat) => {
-          const items = menu.filter((m) => m.category === cat);
+          const items = menu.filter((m) => m.category === cat && !outOfStockIds.includes(m.id));
+          if (items.length === 0) return null;
           return (
             <section key={cat} className="mb-16">
               <div className="border-b border-border/70 pb-3">

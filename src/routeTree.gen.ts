@@ -20,7 +20,9 @@ import { Route as GalleryRouteImport } from "./routes/gallery"
 import { Route as EventsRouteImport } from "./routes/events"
 import { Route as AboutRouteImport } from "./routes/about"
 import { Route as IndexRouteImport } from "./routes/index"
+import { Route as KitchenIndexRouteImport } from "./routes/kitchen/index"
 import { Route as AdminIndexRouteImport } from "./routes/admin/index"
+import { Route as KitchenLoginRouteImport } from "./routes/kitchen/login"
 import { Route as AdminRegisterRouteImport } from "./routes/admin/register"
 import { Route as AdminLoginRouteImport } from "./routes/admin/login"
 
@@ -79,9 +81,19 @@ const IndexRoute = IndexRouteImport.update({
   path: "/",
   getParentRoute: () => rootRouteImport,
 } as any)
+const KitchenIndexRoute = KitchenIndexRouteImport.update({
+  id: "/kitchen/",
+  path: "/kitchen/",
+  getParentRoute: () => rootRouteImport,
+} as any)
 const AdminIndexRoute = AdminIndexRouteImport.update({
   id: "/admin/",
   path: "/admin/",
+  getParentRoute: () => rootRouteImport,
+} as any)
+const KitchenLoginRoute = KitchenLoginRouteImport.update({
+  id: "/kitchen/login",
+  path: "/kitchen/login",
   getParentRoute: () => rootRouteImport,
 } as any)
 const AdminRegisterRoute = AdminRegisterRouteImport.update({
@@ -109,7 +121,9 @@ export interface FileRoutesByFullPath {
   "/visit": typeof VisitRoute
   "/admin/login": typeof AdminLoginRoute
   "/admin/register": typeof AdminRegisterRoute
+  "/kitchen/login": typeof KitchenLoginRoute
   "/admin/": typeof AdminIndexRoute
+  "/kitchen/": typeof KitchenIndexRoute
 }
 export interface FileRoutesByTo {
   "/": typeof IndexRoute
@@ -125,7 +139,9 @@ export interface FileRoutesByTo {
   "/visit": typeof VisitRoute
   "/admin/login": typeof AdminLoginRoute
   "/admin/register": typeof AdminRegisterRoute
+  "/kitchen/login": typeof KitchenLoginRoute
   "/admin": typeof AdminIndexRoute
+  "/kitchen": typeof KitchenIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -142,7 +158,9 @@ export interface FileRoutesById {
   "/visit": typeof VisitRoute
   "/admin/login": typeof AdminLoginRoute
   "/admin/register": typeof AdminRegisterRoute
+  "/kitchen/login": typeof KitchenLoginRoute
   "/admin/": typeof AdminIndexRoute
+  "/kitchen/": typeof KitchenIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -160,7 +178,9 @@ export interface FileRouteTypes {
     | "/visit"
     | "/admin/login"
     | "/admin/register"
+    | "/kitchen/login"
     | "/admin/"
+    | "/kitchen/"
   fileRoutesByTo: FileRoutesByTo
   to:
     | "/"
@@ -176,7 +196,9 @@ export interface FileRouteTypes {
     | "/visit"
     | "/admin/login"
     | "/admin/register"
+    | "/kitchen/login"
     | "/admin"
+    | "/kitchen"
   id:
     | "__root__"
     | "/"
@@ -192,7 +214,9 @@ export interface FileRouteTypes {
     | "/visit"
     | "/admin/login"
     | "/admin/register"
+    | "/kitchen/login"
     | "/admin/"
+    | "/kitchen/"
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -209,7 +233,9 @@ export interface RootRouteChildren {
   VisitRoute: typeof VisitRoute
   AdminLoginRoute: typeof AdminLoginRoute
   AdminRegisterRoute: typeof AdminRegisterRoute
+  KitchenLoginRoute: typeof KitchenLoginRoute
   AdminIndexRoute: typeof AdminIndexRoute
+  KitchenIndexRoute: typeof KitchenIndexRoute
 }
 
 declare module "@tanstack/react-router" {
@@ -291,11 +317,25 @@ declare module "@tanstack/react-router" {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    "/kitchen/": {
+      id: "/kitchen/"
+      path: "/kitchen"
+      fullPath: "/kitchen/"
+      preLoaderRoute: typeof KitchenIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     "/admin/": {
       id: "/admin/"
       path: "/admin"
       fullPath: "/admin/"
       preLoaderRoute: typeof AdminIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    "/kitchen/login": {
+      id: "/kitchen/login"
+      path: "/kitchen/login"
+      fullPath: "/kitchen/login"
+      preLoaderRoute: typeof KitchenLoginRouteImport
       parentRoute: typeof rootRouteImport
     }
     "/admin/register": {
@@ -329,7 +369,9 @@ const rootRouteChildren: RootRouteChildren = {
   VisitRoute: VisitRoute,
   AdminLoginRoute: AdminLoginRoute,
   AdminRegisterRoute: AdminRegisterRoute,
+  KitchenLoginRoute: KitchenLoginRoute,
   AdminIndexRoute: AdminIndexRoute,
+  KitchenIndexRoute: KitchenIndexRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

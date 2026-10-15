@@ -1,17 +1,24 @@
 import { z } from "zod";
 import { createClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
+import { emitKitchenEvent, playNewOrderSound } from "@/lib/kitchen.sync";
+import { sendWhatsAppMessage, sendSms } from "@/lib/notifications.functions";
 
 export const orderItemSchema = z.object({
   id: z.string(),
   name: z.string(),
   qty: z.number().int().min(1),
-  price: z.number().int().min(0),
+  price: z.number().min(0),
   prepTimeMinutes: z.number().optional().default(5),
   fulfillment: z.enum(["pre_ordered", "at_table"]).default("pre_ordered"),
+  status: z.enum(["pending", "done"]).default("pending"),
+  category: z.string().optional(),
+  isVeg: z.boolean().optional(),
 });
 
 export type OrderItem = z.infer<typeof orderItemSchema>;
+export type KitchenStatus = "new" | "preparing" | "ready" | "completed" | "cancelled";
+export type OrderType = "dine_in" | "takeaway" | "delivery";
 
 const bookingSchema = z.object({
   code: z.string().min(1),
@@ -42,6 +49,13 @@ const bookingSchema = z.object({
   paymentReference: z.string().optional().nullable(),
   userId: z.string().optional().nullable(),
   status: z.enum(["confirmed", "cancelled", "completed", "no_show"]).default("confirmed"),
+  kitchenStatus: z.enum(["new", "preparing", "ready", "completed", "cancelled"]).default("new"),
+  orderType: z.enum(["dine_in", "takeaway", "delivery"]).default("dine_in"),
+  cancellationReason: z.string().optional(),
+  cancelledBy: z.enum(["customer", "admin", "kitchen"]).optional(),
+  acceptedAt: z.string().optional(),
+  readyAt: z.string().optional(),
+  completedAt: z.string().optional(),
 });
 
 export type BookingStatus = "confirmed" | "cancelled" | "completed" | "no_show";
@@ -185,6 +199,12 @@ export async function createBooking({ data }: { data: BookingInput }) {
     }
   }
 
+  // Trigger real-time Kitchen display notification if order has food items
+  if (validated.items && validated.items.length > 0) {
+    emitKitchenEvent("NEW_ORDER", { booking: validated });
+    playNewOrderSound();
+  }
+
   return { code: validated.code };
 }
 
@@ -217,13 +237,20 @@ export async function updateBookingPaymentStatus({
   // Also update local storage fallback
   try {
     const existing: BookingInput[] = JSON.parse(localStorage.getItem("cafeq_bookings") || "[]");
+    let targetBooking: BookingInput | null = null;
     const updated = existing.map((b) => {
       if (b.code === code) {
-        return { ...b, paymentStatus: status, paymentReference: reference || b.paymentReference };
+        targetBooking = { ...b, paymentStatus: status, paymentReference: reference || b.paymentReference };
+        return targetBooking;
       }
       return b;
     });
     localStorage.setItem("cafeq_bookings", JSON.stringify(updated));
+
+    if (status === "paid" && targetBooking) {
+      emitKitchenEvent("NEW_ORDER", { booking: targetBooking });
+      playNewOrderSound();
+    }
   } catch {
     // Non-browser
   }
@@ -421,4 +448,156 @@ export async function getAllBookings(): Promise<BookingInput[]> {
     return [];
   }
 }
+
+// ----------------- Kitchen Specific Order Controls -----------------
+
+export async function updateKitchenOrderStatus({
+  code,
+  status,
+  reason,
+  cancelledBy,
+}: {
+  code: string;
+  status: KitchenStatus;
+  reason?: string;
+  cancelledBy?: "customer" | "admin" | "kitchen";
+}): Promise<{ success: boolean; error?: string }> {
+  const now = new Date().toISOString();
+
+  // If status is completed or cancelled, sync overall booking status as well
+  const overallBookingStatus: BookingStatus =
+    status === "completed" ? "completed" : status === "cancelled" ? "cancelled" : "confirmed";
+
+  const supabase = getPublicClient();
+  if (supabase) {
+    try {
+      const updatePayload: Record<string, any> = {
+        status: overallBookingStatus,
+      };
+      if (status === "preparing") updatePayload["accepted_at"] = now;
+      if (status === "ready") updatePayload["food_ready_time"] = now;
+      if (status === "completed") updatePayload["completed_at"] = now;
+      if (reason) updatePayload["notes"] = reason;
+
+      await supabase.from("bookings").update(updatePayload).eq("code", code);
+    } catch (err) {
+      console.warn("Supabase kitchen status update note:", err);
+    }
+  }
+
+  try {
+    const existing: BookingInput[] = JSON.parse(localStorage.getItem("cafeq_bookings") || "[]");
+    let updatedBooking: BookingInput | null = null;
+
+    const updated = existing.map((b) => {
+      if (b.code === code) {
+        const itemStatus = status === "completed" || status === "ready" ? "done" : b.items?.every(i => i.status === "done") ? "done" : "pending";
+        const newItems = b.items?.map(i => ({
+          ...i,
+          status: status === "completed" ? "done" as const : i.status || "pending",
+        })) || [];
+
+        updatedBooking = {
+          ...b,
+          kitchenStatus: status,
+          status: overallBookingStatus,
+          acceptedAt: status === "preparing" ? now : b.acceptedAt,
+          readyAt: status === "ready" ? now : b.readyAt,
+          completedAt: status === "completed" ? now : b.completedAt,
+          cancellationReason: reason || b.cancellationReason,
+          cancelledBy: cancelledBy || b.cancelledBy,
+          items: newItems,
+        };
+        return updatedBooking;
+      }
+      return b;
+    });
+
+    localStorage.setItem("cafeq_bookings", JSON.stringify(updated));
+
+    // Emit event to KDS, customer order tracking, and admin dashboard
+    emitKitchenEvent("ORDER_STATUS_CHANGED", { code, status, reason, booking: updatedBooking });
+
+    // If order marked Ready, notify customer via WhatsApp / SMS / In-App
+    if (status === "ready" && updatedBooking) {
+      sendOrderReadyNotification(updatedBooking).catch(() => {});
+    }
+
+    return { success: true };
+  } catch (err) {
+    console.error("Failed to update kitchen order status in localStorage:", err);
+    return { success: false, error: "Failed to update order status." };
+  }
+}
+
+export async function updateOrderItemStatus({
+  code,
+  itemId,
+  status,
+}: {
+  code: string;
+  itemId: string;
+  status: "pending" | "done";
+}): Promise<{ success: boolean }> {
+  try {
+    const existing: BookingInput[] = JSON.parse(localStorage.getItem("cafeq_bookings") || "[]");
+    let updatedBooking: BookingInput | null = null;
+
+    const updated = existing.map((b) => {
+      if (b.code === code) {
+        const items = b.items?.map((item) => {
+          if (item.id === itemId) {
+            return { ...item, status };
+          }
+          return item;
+        }) || [];
+
+        // If all items are done, can advance kitchenStatus to ready
+        const allDone = items.length > 0 && items.every((i) => i.status === "done");
+        const nextKitchenStatus = allDone && b.kitchenStatus === "preparing" ? "ready" : b.kitchenStatus;
+
+        updatedBooking = {
+          ...b,
+          items,
+          kitchenStatus: nextKitchenStatus,
+          readyAt: nextKitchenStatus === "ready" && !b.readyAt ? new Date().toISOString() : b.readyAt,
+        };
+        return updatedBooking;
+      }
+      return b;
+    });
+
+    localStorage.setItem("cafeq_bookings", JSON.stringify(updated));
+    emitKitchenEvent("ITEM_STATUS_CHANGED", { code, itemId, status, booking: updatedBooking });
+    return { success: true };
+  } catch {
+    return { success: false };
+  }
+}
+
+/**
+ * Sends order ready notification to customer
+ */
+export async function sendOrderReadyNotification(booking: BookingInput): Promise<boolean> {
+  if (!booking.phone) return false;
+
+  const tableInfo = booking.seating ? `Table ${booking.seating}` : booking.tableType || "your table";
+  const message =
+    `Hello ${booking.name}! 🛎️ Your food at CAFEQ is freshly prepared & ready!\n` +
+    `🍽️ Order ref: ${booking.code}\n` +
+    `🪑 Delivered to: ${tableInfo}\n` +
+    `Enjoy your meal! — The CAFEQ Kitchen Team`;
+
+  try {
+    await Promise.all([
+      sendWhatsAppMessage({ to: booking.phone, message }),
+      sendSms({ to: booking.phone, message }),
+    ]);
+    return true;
+  } catch (err) {
+    console.warn("Could not dispatch ready notification:", err);
+    return false;
+  }
+}
+
 
