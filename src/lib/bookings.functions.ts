@@ -3,6 +3,9 @@ import { createClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 import { emitKitchenEvent, playNewOrderSound } from "@/lib/kitchen.sync";
 import { sendWhatsAppMessage, sendSms } from "@/lib/notifications.functions";
+import { dispatchNotification } from "@/lib/notifications";
+import { verifyRazorpayPaymentSignature } from "@/lib/razorpay.service";
+import { storeReceipt, generateReceiptNumber } from "@/lib/receipt.service";
 
 export const orderItemSchema = z.object({
   id: z.string(),
@@ -44,8 +47,8 @@ const bookingSchema = z.object({
   windowPriority: z.boolean().default(false),
   items: z.array(orderItemSchema).max(50).default([]),
   total: z.number().int().min(0).default(0),
-  paymentMethod: z.enum(["pay_on_arrival", "upi_prepay"]).default("pay_on_arrival"),
-  paymentStatus: z.enum(["pending_cash", "pending_qr", "paid"]).default("pending_cash"),
+  paymentMethod: z.enum(["pay_on_arrival", "upi_prepay", "online_razorpay"]).default("pay_on_arrival"),
+  paymentStatus: z.enum(["pending_cash", "pending_qr", "pending_online", "paid", "failed", "refunded"]).default("pending_cash"),
   paymentReference: z.string().optional().nullable(),
   userId: z.string().optional().nullable(),
   status: z.enum(["confirmed", "cancelled", "completed", "no_show"]).default("confirmed"),
@@ -205,17 +208,181 @@ export async function createBooking({ data }: { data: BookingInput }) {
     playNewOrderSound();
   }
 
+  // Automatically dispatch reservation confirmed notification across opted-in channels (SMS, Email, WhatsApp)
+  const itemsSummary = validated.items && validated.items.length > 0
+    ? validated.items.map((i) => `${i.qty}x ${i.name}`).join(", ")
+    : undefined;
+
+  dispatchNotification("reservation_confirmed", {
+    bookingCode: validated.code,
+    customerName: validated.name,
+    customerPhone: validated.phone,
+    customerEmail: validated.customerEmail || undefined,
+    date: validated.date,
+    time: validated.time,
+    tableType: validated.tableType,
+    partySize: validated.party,
+    itemsSummary,
+    totalAmount: validated.total,
+  }).catch((err) => console.warn("Background confirmation notification error:", err));
+
   return { code: validated.code };
 }
 
-// Update payment status (e.g. Mark as Paid for QR code)
+// ─── Razorpay Online Payment Verification & Receipt Flow ───────────────────────
+
+export async function verifyAndCompleteRazorpayPayment({
+  code,
+  orderId,
+  paymentId,
+  signature,
+}: {
+  code: string;
+  orderId: string;
+  paymentId: string;
+  signature: string;
+}): Promise<{ success: boolean; error?: string; receipt?: any }> {
+  // 1. Verify signature
+  const verification = await verifyRazorpayPaymentSignature({
+    orderId,
+    paymentId,
+    signature,
+  });
+
+  if (!verification.verified) {
+    // Record failed payment attempt
+    await updateBookingPaymentStatus({
+      code,
+      status: "failed",
+      reference: paymentId,
+    });
+    return { success: false, error: verification.error || "Payment verification failed" };
+  }
+
+  // 2. Fetch booking details to compute receipt
+  let booking: BookingInput | null = null;
+  const supabase = getPublicClient();
+  if (supabase) {
+    const { data } = await supabase.from("bookings").select("*").eq("code", code).maybeSingle();
+    if (data) {
+      booking = {
+        code: data.code,
+        date: data.date,
+        time: data.time,
+        party: data.party,
+        seating: data.seating,
+        tableType: data.table_type || "window",
+        hasPreorder: data.has_preorder || false,
+        estimatedPrepTime: data.estimated_prep_time || 0,
+        foodReadyTime: data.food_ready_time || null,
+        isPeakHour: data.is_peak_hour || false,
+        depositRequired: data.deposit_required || false,
+        depositAmount: data.deposit_amount || 0,
+        kitchenLoad: (data.kitchen_load as any) || "normal",
+        name: data.name,
+        phone: data.phone,
+        customerEmail: data.customer_email || undefined,
+        notes: data.notes || undefined,
+        dietary: data.dietary || [],
+        occasion: data.occasion || undefined,
+        accessibility: data.accessibility || [],
+        windowPriority: data.window_priority || false,
+        items: (data.items as any) || [],
+        total: data.total || 0,
+        paymentMethod: "online_razorpay",
+        paymentStatus: "paid",
+        paymentReference: paymentId,
+        userId: data.user_id || undefined,
+        status: (data.status as any) || "confirmed",
+      };
+    }
+  }
+
+  if (!booking) {
+    try {
+      const existing: BookingInput[] = JSON.parse(localStorage.getItem("cafeq_bookings") || "[]");
+      booking = existing.find((b) => b.code === code) || null;
+    } catch {
+      // Local error
+    }
+  }
+
+  // 3. Mark payment as paid in DB & localStorage
+  await updateBookingPaymentStatus({
+    code,
+    status: "paid",
+    reference: paymentId,
+  });
+
+  if (!booking) {
+    return { success: true };
+  }
+
+  // 4. Calculate Taxes and Generate Digital Receipt
+  const total = booking.total;
+  const deposit = booking.depositAmount || 0;
+  const itemsTotal = total - deposit;
+  const taxAmount = Math.round(itemsTotal * 0.05 * 100) / 100; // 5% GST
+  const subtotal = itemsTotal - taxAmount;
+  const cgst = Math.round((taxAmount / 2) * 100) / 100;
+  const sgst = Math.round((taxAmount / 2) * 100) / 100;
+  const receiptNumber = generateReceiptNumber(code);
+
+  const receiptRecord = await storeReceipt({
+    receiptNumber,
+    bookingCode: code,
+    orderId,
+    paymentId,
+    paymentMethod: "Razorpay (Online UPI/Card/Wallet)",
+    paymentStatus: "paid",
+    date: booking.date,
+    time: booking.time,
+    customerName: booking.name,
+    customerPhone: booking.phone,
+    customerEmail: booking.customerEmail,
+    tableType: booking.tableType,
+    partySize: booking.party,
+    items: booking.items || [],
+    subtotal: Math.max(0, subtotal),
+    cgst,
+    sgst,
+    taxAmount,
+    depositAmount: deposit,
+    total,
+    createdAt: new Date().toISOString(),
+  });
+
+  // 5. Trigger payment_success notification with PDF receipt attached
+  dispatchNotification("payment_success", {
+    bookingCode: code,
+    customerName: booking.name,
+    customerPhone: booking.phone,
+    customerEmail: booking.customerEmail,
+    totalAmount: total,
+    receiptNumber,
+    paymentId,
+    attachments: receiptRecord.pdfDataUri
+      ? [
+          {
+            filename: `CafeQ-Receipt-${code}.pdf`,
+            contentType: "application/pdf",
+            dataUri: receiptRecord.pdfDataUri,
+          },
+        ]
+      : undefined,
+  }).catch((err) => console.warn("Background payment success notification error:", err));
+
+  return { success: true, receipt: receiptRecord };
+}
+
+// Update payment status (e.g. Mark as Paid for QR code or Razorpay)
 export async function updateBookingPaymentStatus({
   code,
   status,
   reference,
 }: {
   code: string;
-  status: "paid" | "pending_cash" | "pending_qr";
+  status: "paid" | "pending_cash" | "pending_qr" | "pending_online" | "failed" | "refunded";
   reference?: string;
 }) {
   const supabase = getPublicClient();
@@ -240,7 +407,11 @@ export async function updateBookingPaymentStatus({
     let targetBooking: BookingInput | null = null;
     const updated = existing.map((b) => {
       if (b.code === code) {
-        targetBooking = { ...b, paymentStatus: status, paymentReference: reference || b.paymentReference };
+        targetBooking = {
+          ...b,
+          paymentStatus: status as any,
+          paymentReference: reference || b.paymentReference,
+        };
         return targetBooking;
       }
       return b;
@@ -261,10 +432,13 @@ export async function updateBookingPaymentStatus({
 export async function cancelBooking({
   code,
   userId,
+  reason,
 }: {
   code: string;
   userId?: string;
+  reason?: string;
 }): Promise<{ success: boolean; error?: string }> {
+  let targetBooking: BookingInput | null = null;
   const supabase = getPublicClient();
   if (supabase) {
     let query = supabase.from("bookings").update({ status: "cancelled" }).eq("code", code);
@@ -275,6 +449,40 @@ export async function cancelBooking({
     if (error) {
       console.error("cancelBooking supabase error:", error);
     }
+
+    const { data } = await supabase.from("bookings").select("*").eq("code", code).maybeSingle();
+    if (data) {
+      targetBooking = {
+        code: data.code,
+        date: data.date,
+        time: data.time,
+        party: data.party,
+        seating: data.seating,
+        tableType: data.table_type || "window",
+        hasPreorder: data.has_preorder || false,
+        estimatedPrepTime: data.estimated_prep_time || 0,
+        foodReadyTime: data.food_ready_time || null,
+        isPeakHour: data.is_peak_hour || false,
+        depositRequired: data.deposit_required || false,
+        depositAmount: data.deposit_amount || 0,
+        kitchenLoad: (data.kitchen_load as any) || "normal",
+        name: data.name,
+        phone: data.phone,
+        customerEmail: data.customer_email || undefined,
+        notes: data.notes || undefined,
+        dietary: data.dietary || [],
+        occasion: data.occasion || undefined,
+        accessibility: data.accessibility || [],
+        windowPriority: data.window_priority || false,
+        items: (data.items as any) || [],
+        total: data.total || 0,
+        paymentMethod: (data.payment_method as any) || "pay_on_arrival",
+        paymentStatus: (data.payment_status as any) || "pending_cash",
+        paymentReference: data.payment_reference || undefined,
+        userId: data.user_id || undefined,
+        status: "cancelled",
+      };
+    }
   }
 
   // Update in local storage
@@ -282,13 +490,27 @@ export async function cancelBooking({
     const existing: BookingInput[] = JSON.parse(localStorage.getItem("cafeq_bookings") || "[]");
     const updated = existing.map((b) => {
       if (b.code === code) {
-        return { ...b, status: "cancelled" as const };
+        targetBooking = { ...b, status: "cancelled" as const };
+        return targetBooking;
       }
       return b;
     });
     localStorage.setItem("cafeq_bookings", JSON.stringify(updated));
   } catch (err) {
     console.error("Failed to cancel in localStorage:", err);
+  }
+
+  // Dispatch cancellation notification
+  if (targetBooking) {
+    dispatchNotification("cancellation", {
+      bookingCode: code,
+      customerName: targetBooking.name,
+      customerPhone: targetBooking.phone,
+      customerEmail: targetBooking.customerEmail,
+      date: targetBooking.date,
+      time: targetBooking.time,
+      cancellationReason: reason || "Customer requested cancellation",
+    }).catch((err) => console.warn("Cancellation notification error:", err));
   }
 
   return { success: true };
@@ -518,9 +740,25 @@ export async function updateKitchenOrderStatus({
     // Emit event to KDS, customer order tracking, and admin dashboard
     emitKitchenEvent("ORDER_STATUS_CHANGED", { code, status, reason, booking: updatedBooking });
 
-    // If order marked Ready, notify customer via WhatsApp / SMS / In-App
-    if (status === "ready" && updatedBooking) {
-      sendOrderReadyNotification(updatedBooking).catch(() => {});
+    // Multi-channel lifecycle notifications (SMS, Email, WhatsApp)
+    if (updatedBooking) {
+      if (status === "preparing") {
+        dispatchNotification("order_accepted", {
+          bookingCode: code,
+          customerName: updatedBooking.name,
+          customerPhone: updatedBooking.phone,
+          customerEmail: updatedBooking.customerEmail,
+          foodReadyTime: updatedBooking.foodReadyTime || undefined,
+        }).catch((err) => console.warn("Order accepted notification error:", err));
+      } else if (status === "ready") {
+        dispatchNotification("order_ready", {
+          bookingCode: code,
+          customerName: updatedBooking.name,
+          customerPhone: updatedBooking.phone,
+          customerEmail: updatedBooking.customerEmail,
+          tableType: updatedBooking.seating ? `Table ${updatedBooking.seating}` : updatedBooking.tableType || "your table",
+        }).catch((err) => console.warn("Order ready notification error:", err));
+      }
     }
 
     return { success: true };
@@ -576,28 +814,48 @@ export async function updateOrderItemStatus({
 }
 
 /**
- * Sends order ready notification to customer
+ * Sends order ready notification to customer (backward compatible wrapper)
  */
 export async function sendOrderReadyNotification(booking: BookingInput): Promise<boolean> {
-  if (!booking.phone) return false;
+  if (!booking.phone && !booking.customerEmail) return false;
 
   const tableInfo = booking.seating ? `Table ${booking.seating}` : booking.tableType || "your table";
-  const message =
-    `Hello ${booking.name}! 🛎️ Your food at CAFEQ is freshly prepared & ready!\n` +
-    `🍽️ Order ref: ${booking.code}\n` +
-    `🪑 Delivered to: ${tableInfo}\n` +
-    `Enjoy your meal! — The CAFEQ Kitchen Team`;
-
   try {
-    await Promise.all([
-      sendWhatsAppMessage({ to: booking.phone, message }),
-      sendSms({ to: booking.phone, message }),
-    ]);
-    return true;
+    const result = await dispatchNotification("order_ready", {
+      bookingCode: booking.code,
+      customerName: booking.name,
+      customerPhone: booking.phone,
+      customerEmail: booking.customerEmail,
+      tableType: tableInfo,
+    });
+    return Boolean(result.channels.whatsapp?.success || result.channels.sms?.success || result.channels.email?.success);
   } catch (err) {
     console.warn("Could not dispatch ready notification:", err);
     return false;
   }
 }
+
+/**
+ * Sends reservation reminder notification to customer
+ */
+export async function sendReservationReminder(booking: BookingInput): Promise<boolean> {
+  try {
+    const result = await dispatchNotification("reservation_reminder", {
+      bookingCode: booking.code,
+      customerName: booking.name,
+      customerPhone: booking.phone,
+      customerEmail: booking.customerEmail,
+      date: booking.date,
+      time: booking.time,
+      tableType: booking.tableType,
+      partySize: booking.party,
+    });
+    return Boolean(result.channels.whatsapp?.success || result.channels.sms?.success || result.channels.email?.success);
+  } catch (err) {
+    console.warn("Could not dispatch reminder notification:", err);
+    return false;
+  }
+}
+
 
 

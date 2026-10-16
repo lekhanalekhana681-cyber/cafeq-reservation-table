@@ -1,0 +1,363 @@
+/**
+ * Digital Receipt Service (PDF Generation & Storage)
+ * Generates itemized, tax-compliant PDF receipts that can be downloaded, emailed, and stored.
+ */
+
+import { jsPDF } from "jspdf";
+import { createClient } from "@supabase/supabase-js";
+import type { Database } from "@/integrations/supabase/types";
+import type { OrderItem } from "@/lib/bookings.functions";
+
+export interface ReceiptData {
+  receiptNumber: string;
+  bookingCode: string;
+  orderId?: string;
+  paymentId?: string;
+  paymentMethod: string;
+  paymentStatus: "paid" | "pending" | "refunded";
+  date: string;
+  time: string;
+  customerName: string;
+  customerPhone: string;
+  customerEmail?: string;
+  tableType: string;
+  partySize: number;
+  items: OrderItem[];
+  subtotal: number;
+  cgst: number;
+  sgst: number;
+  taxAmount: number;
+  depositAmount: number;
+  total: number;
+  createdAt: string;
+}
+
+export interface StoredReceipt extends ReceiptData {
+  id: string;
+  pdfDataUri?: string;
+  emailedAt?: string | null;
+}
+
+const STORAGE_RECEIPTS_KEY = "cafeq_receipts";
+
+function getPublicClient() {
+  const url = import.meta.env?.VITE_SUPABASE_URL || process.env?.["SUPABASE_URL"];
+  const key = import.meta.env?.VITE_SUPABASE_ANON_KEY || process.env?.["SUPABASE_PUBLISHABLE_KEY"];
+  if (!url || !key) return null;
+  return createClient<Database>(url, key, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+}
+
+// ─── Receipt Number Generator ─────────────────────────────────────────────────
+
+export function generateReceiptNumber(bookingCode: string): string {
+  const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+  const suffix = Math.random().toString(36).substring(2, 6).toUpperCase();
+  return `CQ-RCP-${dateStr}-${bookingCode.toUpperCase()}-${suffix}`;
+}
+
+// ─── PDF Document Generator ───────────────────────────────────────────────────
+
+export function generateReceiptPdf(data: ReceiptData): jsPDF {
+  const doc = new jsPDF({
+    orientation: "portrait",
+    unit: "mm",
+    format: "a4",
+  });
+
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const margin = 20;
+  let y = 20;
+
+  // Header background banner
+  doc.setFillColor(24, 24, 27); // Dark zinc
+  doc.rect(0, 0, pageWidth, 42, "F");
+
+  // Cafe Branding
+  doc.setTextColor(255, 255, 255);
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(22);
+  doc.text("CafeQ", margin, 18);
+
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(9);
+  doc.setTextColor(212, 212, 216);
+  doc.text("Artisanal Roastery & Kitchen", margin, 24);
+  doc.text("238/25, Rajmahal Vilas Extension, Malleshwaram, Bangalore - 560080", margin, 29);
+  doc.text("GSTIN: 29ABCDE1234F1Z5 · FSSAI Lic: 11223344000123 · Contact: +91 90000 00001", margin, 34);
+
+  // Receipt Title & Badge
+  y = 54;
+  doc.setTextColor(24, 24, 27);
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(14);
+  doc.text("TAX INVOICE & DIGITAL RECEIPT", margin, y);
+
+  // Paid Status Pill
+  doc.setFillColor(16, 185, 129); // Emerald 500
+  doc.roundedRect(pageWidth - margin - 35, y - 6, 35, 8, 2, 2, "F");
+  doc.setTextColor(255, 255, 255);
+  doc.setFontSize(9);
+  doc.text("PAYMENT VERIFIED", pageWidth - margin - 33, y - 1);
+
+  // Metadata Grid
+  y += 10;
+  doc.setDrawColor(228, 228, 231);
+  doc.setLineWidth(0.3);
+  doc.line(margin, y, pageWidth - margin, y);
+
+  y += 7;
+  doc.setFontSize(9);
+  doc.setTextColor(113, 113, 122);
+  doc.text("Receipt No:", margin, y);
+  doc.text("Booking Ref:", margin + 80, y);
+
+  doc.setFont("helvetica", "bold");
+  doc.setTextColor(24, 24, 27);
+  doc.text(data.receiptNumber, margin + 25, y);
+  doc.text(data.bookingCode, margin + 105, y);
+
+  y += 6;
+  doc.setFont("helvetica", "normal");
+  doc.setTextColor(113, 113, 122);
+  doc.text("Date & Time:", margin, y);
+  doc.text("Transaction ID:", margin + 80, y);
+
+  doc.setFont("helvetica", "bold");
+  doc.setTextColor(24, 24, 27);
+  doc.text(`${data.date} at ${data.time}`, margin + 25, y);
+  doc.text(data.paymentId || "N/A (Prepaid)", margin + 105, y);
+
+  y += 6;
+  doc.setFont("helvetica", "normal");
+  doc.setTextColor(113, 113, 122);
+  doc.text("Billed To:", margin, y);
+  doc.text("Table & Party:", margin + 80, y);
+
+  doc.setFont("helvetica", "bold");
+  doc.setTextColor(24, 24, 27);
+  doc.text(`${data.customerName} (${data.customerPhone})`, margin + 25, y);
+  doc.text(`${data.tableType} · ${data.partySize} Guest${data.partySize > 1 ? "s" : ""}`, margin + 105, y);
+
+  y += 10;
+  doc.line(margin, y, pageWidth - margin, y);
+
+  // Items Table Header
+  y += 7;
+  doc.setFillColor(244, 244, 245);
+  doc.rect(margin, y - 5, pageWidth - margin * 2, 8, "F");
+
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(8.5);
+  doc.setTextColor(63, 63, 70);
+  doc.text("ITEM DESCRIPTION", margin + 3, y);
+  doc.text("QTY", margin + 100, y);
+  doc.text("UNIT RATE (INR)", margin + 120, y);
+  doc.text("AMOUNT (INR)", pageWidth - margin - 3, y, { align: "right" });
+
+  y += 6;
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(8.5);
+  doc.setTextColor(24, 24, 27);
+
+  // Item Rows
+  if (data.items && data.items.length > 0) {
+    data.items.forEach((item) => {
+      const lineTotal = item.qty * item.price;
+      const vegTag = item.isVeg ? "[Veg] " : "";
+      doc.text(`${vegTag}${item.name}`, margin + 3, y);
+      doc.text(String(item.qty), margin + 103, y);
+      doc.text(`INR ${item.price.toFixed(2)}`, margin + 125, y);
+      doc.text(`INR ${lineTotal.toFixed(2)}`, pageWidth - margin - 3, y, { align: "right" });
+      y += 6;
+    });
+  } else {
+    doc.text("Table Reservation Slot Booking", margin + 3, y);
+    doc.text("1", margin + 103, y);
+    doc.text(`INR ${data.total.toFixed(2)}`, margin + 125, y);
+    doc.text(`INR ${data.total.toFixed(2)}`, pageWidth - margin - 3, y, { align: "right" });
+    y += 6;
+  }
+
+  // Summary Lines
+  y += 4;
+  doc.setDrawColor(228, 228, 231);
+  doc.line(margin, y, pageWidth - margin, y);
+
+  y += 6;
+  const colLabel = pageWidth - margin - 65;
+  const colVal = pageWidth - margin - 3;
+
+  doc.setFont("helvetica", "normal");
+  doc.setTextColor(113, 113, 122);
+  doc.text("Subtotal:", colLabel, y);
+  doc.text(`INR ${data.subtotal.toFixed(2)}`, colVal, y, { align: "right" });
+
+  y += 5;
+  doc.text("CGST (2.5%):", colLabel, y);
+  doc.text(`INR ${data.cgst.toFixed(2)}`, colVal, y, { align: "right" });
+
+  y += 5;
+  doc.text("SGST (2.5%):", colLabel, y);
+  doc.text(`INR ${data.sgst.toFixed(2)}`, colVal, y, { align: "right" });
+
+  if (data.depositAmount > 0) {
+    y += 5;
+    doc.text("Table Hold Deposit:", colLabel, y);
+    doc.text(`INR ${data.depositAmount.toFixed(2)}`, colVal, y, { align: "right" });
+  }
+
+  y += 6;
+  doc.setFillColor(244, 244, 245);
+  doc.rect(colLabel - 3, y - 4, 68, 8, "F");
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(10);
+  doc.setTextColor(24, 24, 27);
+  doc.text("TOTAL PAID:", colLabel, y + 1);
+  doc.text(`INR ${data.total.toFixed(2)}`, colVal, y + 1, { align: "right" });
+
+  // Payment Breakdown Box
+  y += 18;
+  doc.setFillColor(250, 250, 250);
+  doc.roundedRect(margin, y, pageWidth - margin * 2, 22, 2, 2, "F");
+  doc.setDrawColor(228, 228, 231);
+  doc.roundedRect(margin, y, pageWidth - margin * 2, 22, 2, 2, "S");
+
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(8.5);
+  doc.setTextColor(63, 63, 70);
+  doc.text("PAYMENT DETAILS", margin + 4, y + 6);
+
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(8);
+  doc.setTextColor(113, 113, 122);
+  doc.text(`Method: ${data.paymentMethod} (Razorpay Secure)`, margin + 4, y + 12);
+  doc.text(`Gateway Ref: ${data.paymentId || "Verified Online"}`, margin + 4, y + 17);
+  doc.text(`Order Ref: ${data.orderId || data.bookingCode}`, margin + 95, y + 12);
+  doc.text(`Status: COMPLETED / SETTLED`, margin + 95, y + 17);
+
+  // Footer & Terms
+  y = 265;
+  doc.setFontSize(7.5);
+  doc.setTextColor(161, 161, 170);
+  doc.text("Thank you for choosing CafeQ! This is a computer-generated tax receipt.", pageWidth / 2, y, {
+    align: "center",
+  });
+  doc.text("For order queries or reservation modifications, please quote your Booking Reference.", pageWidth / 2, y + 4, {
+    align: "center",
+  });
+
+  return doc;
+}
+
+// ─── Download and Data URI Helpers ────────────────────────────────────────────
+
+export function downloadReceiptPdf(data: ReceiptData): void {
+  const doc = generateReceiptPdf(data);
+  doc.save(`CafeQ-Receipt-${data.bookingCode}.pdf`);
+}
+
+export function getReceiptPdfDataUri(data: ReceiptData): string {
+  const doc = generateReceiptPdf(data);
+  return doc.output("datauristring");
+}
+
+// ─── Persistence (Supabase + LocalStorage) ───────────────────────────────────
+
+export async function storeReceipt(data: ReceiptData): Promise<StoredReceipt> {
+  const pdfDataUri = getReceiptPdfDataUri(data);
+  const receiptRecord: StoredReceipt = {
+    ...data,
+    id: `rcpt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+    pdfDataUri,
+  };
+
+  const supabase = getPublicClient();
+  if (supabase) {
+    try {
+      await supabase.from("receipts").insert({
+        booking_code: data.bookingCode,
+        receipt_number: data.receiptNumber,
+        order_id: data.orderId || null,
+        payment_id: data.paymentId || null,
+        payment_method: data.paymentMethod,
+        amount: data.total,
+        tax_amount: data.taxAmount,
+        items: data.items as any,
+        customer_name: data.customerName,
+        customer_phone: data.customerPhone,
+        customer_email: data.customerEmail || null,
+        pdf_data: pdfDataUri,
+      });
+    } catch (err) {
+      console.warn("Could not insert receipt into Supabase, saving locally:", err);
+    }
+  }
+
+  // Local storage fallback
+  try {
+    const existing: StoredReceipt[] = JSON.parse(localStorage.getItem(STORAGE_RECEIPTS_KEY) || "[]");
+    const filtered = existing.filter((r) => r.bookingCode !== data.bookingCode);
+    filtered.push(receiptRecord);
+    localStorage.setItem(STORAGE_RECEIPTS_KEY, JSON.stringify(filtered));
+  } catch (err) {
+    console.error("Failed to save receipt locally:", err);
+  }
+
+  return receiptRecord;
+}
+
+export async function getReceiptByBookingCode(bookingCode: string): Promise<StoredReceipt | null> {
+  const supabase = getPublicClient();
+  if (supabase) {
+    try {
+      const { data, error } = await supabase
+        .from("receipts")
+        .select("*")
+        .eq("booking_code", bookingCode)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (!error && data) {
+        return {
+          id: data.id,
+          receiptNumber: data.receipt_number,
+          bookingCode: data.booking_code,
+          orderId: data.order_id || undefined,
+          paymentId: data.payment_id || undefined,
+          paymentMethod: data.payment_method,
+          paymentStatus: "paid",
+          date: data.created_at.slice(0, 10),
+          time: new Date(data.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+          customerName: data.customer_name,
+          customerPhone: data.customer_phone,
+          customerEmail: data.customer_email || undefined,
+          tableType: "Reserved Table",
+          partySize: 1,
+          items: (data.items as any) || [],
+          subtotal: Number(data.amount) - Number(data.tax_amount || 0),
+          cgst: Number(data.tax_amount || 0) / 2,
+          sgst: Number(data.tax_amount || 0) / 2,
+          taxAmount: Number(data.tax_amount || 0),
+          depositAmount: 0,
+          total: Number(data.amount),
+          createdAt: data.created_at,
+          pdfDataUri: data.pdf_data || undefined,
+          emailedAt: data.emailed_at,
+        };
+      }
+    } catch (err) {
+      console.warn("Supabase receipt retrieval error, falling back to local:", err);
+    }
+  }
+
+  try {
+    const existing: StoredReceipt[] = JSON.parse(localStorage.getItem(STORAGE_RECEIPTS_KEY) || "[]");
+    const found = existing.find((r) => r.bookingCode === bookingCode);
+    return found || null;
+  } catch {
+    return null;
+  }
+}

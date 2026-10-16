@@ -19,6 +19,10 @@ import {
   ShieldAlert,
   Wine,
   AlertCircle,
+  CreditCard,
+  Download,
+  FileText,
+  Banknote,
 } from "lucide-react";
 import { toast } from "sonner";
 import { useQuery } from "@tanstack/react-query";
@@ -37,9 +41,12 @@ import {
   evaluateSlotAndCustomer,
   getUserBookings,
   updateBookingPaymentStatus,
+  verifyAndCompleteRazorpayPayment,
   type OrderItem,
 } from "@/lib/bookings.functions";
 import { sendBookingConfirmationNotifications } from "@/lib/notifications.functions";
+import { openRazorpayCheckout } from "@/lib/razorpay.service";
+import { downloadReceiptPdf, getReceiptByBookingCode, type StoredReceipt } from "@/lib/receipt.service";
 import { getCafeSettings } from "@/lib/settings.functions";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -224,15 +231,17 @@ function ReservePage() {
 
   // Cart
   const [cart, setCart] = useState<Record<string, CartItemState>>({});
-  // Payment: qr_code vs cash
-  const [paymentMethod, setPaymentMethod] = useState<"upi_prepay" | "pay_on_arrival">("upi_prepay");
+  // Payment: online_razorpay vs upi_prepay vs pay_on_arrival
+  const [paymentMethod, setPaymentMethod] = useState<"online_razorpay" | "upi_prepay" | "pay_on_arrival">("online_razorpay");
   const [code, setCode] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
-  // Post-booking QR payment state
+  // Post-booking QR and Online payment state
   const [qrPaymentStatus, setQrPaymentStatus] = useState<"pending" | "paid">("pending");
   const [txnRef, setTxnRef] = useState("");
   const [markingPaid, setMarkingPaid] = useState(false);
+  const [payingOnline, setPayingOnline] = useState(false);
+  const [receiptData, setReceiptData] = useState<StoredReceipt | null>(null);
 
   useEffect(() => {
     if (phone.trim().length >= 10) {
@@ -403,7 +412,12 @@ function ReservePage() {
 
     setSubmitting(true);
     const bookingCode = genCode();
-    const initialPaymentStatus = paymentMethod === "upi_prepay" ? "pending_qr" : "pending_cash";
+    const initialPaymentStatus =
+      paymentMethod === "online_razorpay"
+        ? "pending_online"
+        : paymentMethod === "upi_prepay"
+        ? "pending_qr"
+        : "pending_cash";
 
     try {
       await createBooking({
@@ -474,11 +488,61 @@ function ReservePage() {
         reference: txnRef.trim() || `UPI-TXN-${Date.now().toString().slice(-6)}`,
       });
       setQrPaymentStatus("paid");
+
+      // Generate receipt
+      const fetchedReceipt = await getReceiptByBookingCode(code);
+      if (fetchedReceipt) setReceiptData(fetchedReceipt);
+
       toast.success("Payment marked as verified!");
     } catch (err) {
       toast.error("Could not update payment status.");
     } finally {
       setMarkingPaid(false);
+    }
+  };
+
+  const handlePayWithRazorpay = async () => {
+    if (!code) return;
+    setPayingOnline(true);
+    try {
+      await openRazorpayCheckout({
+        amount: totalWithDeposit,
+        bookingCode: code,
+        customerName: name,
+        customerEmail: email || undefined,
+        customerPhone: phone,
+        description: `CafeQ Dining & Reservation — ${code}`,
+        onSuccess: async (payment) => {
+          toast.info("Verifying Razorpay payment signature…");
+          const verification = await verifyAndCompleteRazorpayPayment({
+            code,
+            orderId: payment.razorpay_order_id,
+            paymentId: payment.razorpay_payment_id,
+            signature: payment.razorpay_signature,
+          });
+
+          if (verification.success) {
+            setQrPaymentStatus("paid");
+            if (verification.receipt) {
+              setReceiptData(verification.receipt);
+            }
+            toast.success("Payment verified! Digital receipt generated & sent.");
+          } else {
+            toast.error(verification.error || "Payment verification failed.");
+          }
+          setPayingOnline(false);
+        },
+        onError: (err) => {
+          toast.error(`Payment failed: ${err.description}`);
+          setPayingOnline(false);
+        },
+        onDismiss: () => {
+          setPayingOnline(false);
+        },
+      });
+    } catch (err) {
+      toast.error("Could not launch Razorpay checkout.");
+      setPayingOnline(false);
     }
   };
 
@@ -511,8 +575,67 @@ function ReservePage() {
           <p className="mt-1 font-display text-3xl tracking-widest text-foreground font-bold">{code}</p>
         </div>
 
-        {/* Payment Confirmation Component: QR Code vs Cash on Arrival */}
-        {paymentMethod === "upi_prepay" ? (
+        {/* Payment Confirmation Component: Razorpay vs QR Code vs Cash on Arrival */}
+        {paymentMethod === "online_razorpay" ? (
+          <div className="mt-8 rounded-2xl border border-border bg-card p-6 text-left shadow-warm">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="eyebrow text-accent">Payment Gateway: Razorpay</p>
+                <h3 className="text-lg font-semibold text-foreground mt-0.5">Total Amount: ₹{totalWithDeposit}</h3>
+              </div>
+              <Badge
+                variant={qrPaymentStatus === "paid" ? "default" : "secondary"}
+                className={qrPaymentStatus === "paid" ? "bg-emerald-600 text-white" : "bg-amber-500/10 text-amber-700"}
+              >
+                {qrPaymentStatus === "paid" ? "✅ Payment Verified" : "⏳ Pending Razorpay Payment"}
+              </Badge>
+            </div>
+
+            {qrPaymentStatus === "pending" ? (
+              <div className="mt-5 space-y-4">
+                <p className="text-xs text-muted-foreground leading-relaxed">
+                  Pay securely via <strong>Razorpay (UPI, Credit/Debit Cards, Netbanking, Wallets)</strong>. 
+                  Test mode enabled. Once settled, your digital tax receipt will be generated automatically and attached to your confirmation email.
+                </p>
+
+                <div className="pt-2">
+                  <Button
+                    onClick={handlePayWithRazorpay}
+                    disabled={payingOnline}
+                    className="w-full bg-accent hover:bg-accent/90 text-accent-foreground font-semibold py-3 shadow-md"
+                    size="lg"
+                  >
+                    <CreditCard className="size-4 mr-2" />
+                    {payingOnline ? "Opening Razorpay Checkout…" : `Pay ₹${totalWithDeposit} with Razorpay`}
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <div className="mt-5 rounded-xl bg-emerald-500/10 border border-emerald-500/20 p-5 text-center space-y-3">
+                <div>
+                  <p className="font-semibold text-emerald-800 dark:text-emerald-300 text-base">
+                    Online Payment Verified & Completed!
+                  </p>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Your payment of ₹{totalWithDeposit} has been processed via Razorpay. Booking ref: {code}.
+                  </p>
+                </div>
+
+                {receiptData && (
+                  <div className="pt-2 flex justify-center">
+                    <Button
+                      onClick={() => downloadReceiptPdf(receiptData)}
+                      className="bg-emerald-700 hover:bg-emerald-800 text-white text-xs shadow-sm"
+                      size="sm"
+                    >
+                      <Download className="size-3.5 mr-1.5" /> Download Tax Receipt (PDF)
+                    </Button>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        ) : paymentMethod === "upi_prepay" ? (
           <div className="mt-8 rounded-2xl border border-border bg-card p-6 text-left shadow-warm">
             <div className="flex items-center justify-between">
               <div>
@@ -571,6 +694,17 @@ function ReservePage() {
                 <p className="text-xs text-muted-foreground">
                   Your payment receipt of ₹{totalWithDeposit} has been logged under code {code}.
                 </p>
+                {receiptData && (
+                  <div className="pt-2 flex justify-center">
+                    <Button
+                      onClick={() => downloadReceiptPdf(receiptData)}
+                      className="bg-emerald-700 hover:bg-emerald-800 text-white text-xs shadow-sm"
+                      size="sm"
+                    >
+                      <Download className="size-3.5 mr-1.5" /> Download Tax Receipt (PDF)
+                    </Button>
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -1169,9 +1303,32 @@ function ReservePage() {
               </div>
             )}
 
-            {/* Feature 1 & 5: Payment Options (QR Code vs Cash on Arrival) */}
+            {/* Payment Options: Razorpay Online vs QR Code vs Cash */}
             <div className="mt-5 space-y-2.5 border-t border-border/70 pt-4">
               <p className="text-xs font-semibold text-foreground">Payment Method</p>
+
+              <label className={`flex cursor-pointer items-start gap-2.5 rounded-xl border p-2.5 transition-colors text-xs ${
+                paymentMethod === "online_razorpay" ? "border-accent bg-accent/10" : "border-border hover:bg-secondary/40"
+              }`}>
+                <input
+                  type="radio"
+                  name="payment"
+                  className="mt-0.5"
+                  checked={paymentMethod === "online_razorpay"}
+                  onChange={() => setPaymentMethod("online_razorpay")}
+                />
+                <div className="flex-1">
+                  <div className="flex items-center justify-between">
+                    <p className="font-semibold text-foreground flex items-center gap-1">
+                      <CreditCard className="size-3.5 text-accent" /> Razorpay Online (UPI, Cards, Wallets)
+                    </p>
+                    <Badge variant="secondary" className="text-[10px] bg-emerald-500/10 text-emerald-600">Test Mode</Badge>
+                  </div>
+                  <p className="text-[11px] text-muted-foreground mt-0.5">
+                    Cards, UPI, Netbanking & Wallets with instant digital PDF receipt.
+                  </p>
+                </div>
+              </label>
 
               <label className={`flex cursor-pointer items-start gap-2.5 rounded-xl border p-2.5 transition-colors text-xs ${
                 paymentMethod === "upi_prepay" ? "border-accent bg-accent/10" : "border-border hover:bg-secondary/40"
@@ -1191,7 +1348,7 @@ function ReservePage() {
                     <Badge variant="secondary" className="text-[10px]">Instant</Badge>
                   </div>
                   <p className="text-[11px] text-muted-foreground mt-0.5">
-                    Scan with UPI on confirmation & mark as paid.
+                    Scan with UPI app on confirmation & mark as paid.
                   </p>
                 </div>
               </label>

@@ -11,10 +11,26 @@ import {
   AlertTriangle,
   LogIn,
   ChevronRight,
+  Download,
+  Bell,
+  FileText,
+  Check,
+  CreditCard,
 } from "lucide-react";
 import { toast } from "sonner";
 import { useAuth } from "@/context/AuthContext";
 import { getUserBookings, cancelBooking, type BookingInput } from "@/lib/bookings.functions";
+import {
+  getReceiptByBookingCode,
+  downloadReceiptPdf,
+  generateReceiptNumber,
+} from "@/lib/receipt.service";
+import {
+  getUserNotificationPreferences,
+  updateUserNotificationPreferences,
+  type NotificationPreferences,
+  DEFAULT_PREFERENCES,
+} from "@/lib/notifications";
 import { tableTypes } from "@/data/menu";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -51,6 +67,92 @@ function HistoryPage() {
   const [loading, setLoading] = useState(false);
   const [activeTab, setActiveTab] = useState<"upcoming" | "past">("upcoming");
   const [cancellingCode, setCancellingCode] = useState<string | null>(null);
+  const [downloadingCode, setDownloadingCode] = useState<string | null>(null);
+  const [showPrefs, setShowPrefs] = useState(false);
+  const [prefs, setPrefs] = useState<NotificationPreferences>(DEFAULT_PREFERENCES);
+  const [savingPrefs, setSavingPrefs] = useState(false);
+
+  useEffect(() => {
+    if (user || searchPhone) {
+      getUserNotificationPreferences({
+        userId: user?.id,
+        phone: user?.phone || searchPhone,
+        email: user?.email,
+      }).then(setPrefs);
+    }
+  }, [user, searchPhone]);
+
+  const handleTogglePref = async (key: keyof NotificationPreferences) => {
+    const updated = { ...prefs, [key]: !prefs[key] };
+    setPrefs(updated);
+    setSavingPrefs(true);
+    try {
+      await updateUserNotificationPreferences(
+        {
+          userId: user?.id,
+          phone: user?.phone || searchPhone,
+          email: user?.email,
+        },
+        { [key]: updated[key] }
+      );
+      toast.success("Notification preferences updated!");
+    } catch {
+      toast.error("Failed to save preference.");
+    } finally {
+      setSavingPrefs(false);
+    }
+  };
+
+  const handleDownloadReceipt = async (b: BookingInput) => {
+    setDownloadingCode(b.code);
+    try {
+      // 1. Check if stored receipt exists
+      let receipt = await getReceiptByBookingCode(b.code);
+
+      if (!receipt) {
+        // Generate on the fly from booking details
+        const total = b.total || 0;
+        const deposit = b.depositAmount || 0;
+        const itemsTotal = Math.max(0, total - deposit);
+        const taxAmount = Math.round(itemsTotal * 0.05 * 100) / 100;
+        const subtotal = Math.max(0, itemsTotal - taxAmount);
+        const cgst = Math.round((taxAmount / 2) * 100) / 100;
+        const sgst = Math.round((taxAmount / 2) * 100) / 100;
+
+        receipt = {
+          id: `rcpt_${b.code}`,
+          receiptNumber: generateReceiptNumber(b.code),
+          bookingCode: b.code,
+          orderId: `order_${b.code}`,
+          paymentId: b.paymentReference || "Prepaid",
+          paymentMethod: b.paymentMethod === "online_razorpay" ? "Razorpay Online" : b.paymentMethod === "upi_prepay" ? "UPI QR Code" : "Cash on Arrival",
+          paymentStatus: (b.paymentStatus as any) === "paid" ? "paid" : "pending",
+          date: b.date,
+          time: b.time,
+          customerName: b.name,
+          customerPhone: b.phone,
+          customerEmail: b.customerEmail,
+          tableType: b.tableType || "Reserved Table",
+          partySize: b.party,
+          items: b.items || [],
+          subtotal,
+          cgst,
+          sgst,
+          taxAmount,
+          depositAmount: deposit,
+          total,
+          createdAt: new Date().toISOString(),
+        };
+      }
+
+      downloadReceiptPdf(receipt);
+      toast.success(`Downloaded digital receipt for ${b.code}`);
+    } catch (err) {
+      toast.error("Could not generate receipt PDF.");
+    } finally {
+      setDownloadingCode(null);
+    }
+  };
 
   const fetchBookings = async (customPhone?: string) => {
     setLoading(true);
@@ -153,14 +255,99 @@ function HistoryPage() {
           </p>
         </div>
 
-        {!isAuthenticated && (
-          <Button asChild size="sm" className="shrink-0 shadow-sm">
-            <Link to="/login" search={{ redirect: "/history" }}>
-              <LogIn className="size-4 mr-1.5" /> Sign In for Full History
-            </Link>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setShowPrefs((prev) => !prev)}
+            className="text-xs shadow-xs"
+          >
+            <Bell className="size-3.5 mr-1.5 text-accent" />
+            {showPrefs ? "Hide Preferences" : "Notification Settings"}
           </Button>
-        )}
+
+          {!isAuthenticated && (
+            <Button asChild size="sm" className="shrink-0 shadow-sm">
+              <Link to="/login" search={{ redirect: "/history" }}>
+                <LogIn className="size-4 mr-1.5" /> Sign In for Full History
+              </Link>
+            </Button>
+          )}
+        </div>
       </div>
+
+      {/* Notification Preferences Drawer / Card */}
+      {showPrefs && (
+        <div className="mt-6 rounded-2xl border border-border bg-card p-6 shadow-sm animate-in fade-in space-y-4">
+          <div className="flex items-center justify-between border-b border-border/70 pb-3">
+            <div>
+              <h3 className="font-semibold text-base text-foreground flex items-center gap-2">
+                <Bell className="size-4 text-accent" /> Communication & Notification Preferences
+              </h3>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                Choose the channels you want CafeQ updates sent to (reservation confirmations, kitchen alerts, receipts & reminders).
+              </p>
+            </div>
+            {savingPrefs && (
+              <span className="text-[11px] text-muted-foreground animate-pulse">Saving…</span>
+            )}
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 pt-2">
+            <label className="flex items-start gap-3 p-3 rounded-xl border border-border/80 bg-secondary/30 cursor-pointer hover:bg-secondary/50 transition-colors">
+              <input
+                type="checkbox"
+                checked={prefs.whatsappEnabled}
+                onChange={() => handleTogglePref("whatsappEnabled")}
+                className="mt-0.5 rounded text-accent"
+              />
+              <div>
+                <p className="text-xs font-semibold text-foreground">WhatsApp Messages</p>
+                <p className="text-[11px] text-muted-foreground">Order updates & booking refs via WhatsApp Cloud API</p>
+              </div>
+            </label>
+
+            <label className="flex items-start gap-3 p-3 rounded-xl border border-border/80 bg-secondary/30 cursor-pointer hover:bg-secondary/50 transition-colors">
+              <input
+                type="checkbox"
+                checked={prefs.smsEnabled}
+                onChange={() => handleTogglePref("smsEnabled")}
+                className="mt-0.5 rounded text-accent"
+              />
+              <div>
+                <p className="text-xs font-semibold text-foreground">SMS Alerts</p>
+                <p className="text-[11px] text-muted-foreground">Instant SMS confirmations via MSG91 / Twilio</p>
+              </div>
+            </label>
+
+            <label className="flex items-start gap-3 p-3 rounded-xl border border-border/80 bg-secondary/30 cursor-pointer hover:bg-secondary/50 transition-colors">
+              <input
+                type="checkbox"
+                checked={prefs.emailEnabled}
+                onChange={() => handleTogglePref("emailEnabled")}
+                className="mt-0.5 rounded text-accent"
+              />
+              <div>
+                <p className="text-xs font-semibold text-foreground">Email & PDF Receipts</p>
+                <p className="text-[11px] text-muted-foreground">Detailed HTML emails with downloadable tax receipts</p>
+              </div>
+            </label>
+
+            <label className="flex items-start gap-3 p-3 rounded-xl border border-border/80 bg-secondary/30 cursor-pointer hover:bg-secondary/50 transition-colors">
+              <input
+                type="checkbox"
+                checked={prefs.remindersEnabled}
+                onChange={() => handleTogglePref("remindersEnabled")}
+                className="mt-0.5 rounded text-accent"
+              />
+              <div>
+                <p className="text-xs font-semibold text-foreground">Visit Reminders</p>
+                <p className="text-[11px] text-muted-foreground">Friendly reminders 1–2 hours before reservation time</p>
+              </div>
+            </label>
+          </div>
+        </div>
+      )}
 
       {/* Guest Phone Lookup (if not logged in) */}
       {!isAuthenticated && (
@@ -296,6 +483,18 @@ function HistoryPage() {
                         {cancellingCode === b.code ? "Cancelling…" : "Cancel Reservation"}
                       </Button>
                     )}
+
+                    {/* Digital PDF Receipt Download */}
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => handleDownloadReceipt(b)}
+                      disabled={downloadingCode === b.code}
+                      className="text-xs border-border/80 hover:bg-secondary/60 text-foreground"
+                    >
+                      <Download className="size-3.5 mr-1.5 text-accent" />
+                      {downloadingCode === b.code ? "Generating…" : "Receipt (PDF)"}
+                    </Button>
 
                     {/* Rebook Shortcut */}
                     <Button

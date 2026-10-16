@@ -27,7 +27,11 @@ global.localStorage = {
 };
 
 // Mock window and CustomEvent
+(global as any).btoa = (str: string) => Buffer.from(str, "binary").toString("base64");
+(global as any).atob = (b64: string) => Buffer.from(b64, "base64").toString("binary");
 (global as any).window = {
+  btoa: (global as any).btoa,
+  atob: (global as any).atob,
   dispatchEvent: () => true,
   addEventListener: () => {},
   removeEventListener: () => {},

@@ -203,6 +203,138 @@ export interface Database {
           value?: string;
         };
       };
+      receipts: {
+        Row: {
+          id: string;
+          booking_code: string;
+          receipt_number: string;
+          order_id: string | null;
+          payment_id: string | null;
+          payment_method: string;
+          amount: number;
+          tax_amount: number;
+          items: Json;
+          customer_name: string;
+          customer_phone: string;
+          customer_email: string | null;
+          pdf_data: string | null;
+          created_at: string;
+          emailed_at: string | null;
+        };
+        Insert: {
+          id?: string;
+          booking_code: string;
+          receipt_number: string;
+          order_id?: string | null;
+          payment_id?: string | null;
+          payment_method?: string;
+          amount: number;
+          tax_amount?: number;
+          items?: Json;
+          customer_name: string;
+          customer_phone: string;
+          customer_email?: string | null;
+          pdf_data?: string | null;
+          created_at?: string;
+          emailed_at?: string | null;
+        };
+        Update: {
+          id?: string;
+          booking_code?: string;
+          receipt_number?: string;
+          order_id?: string | null;
+          payment_id?: string | null;
+          payment_method?: string;
+          amount?: number;
+          tax_amount?: number;
+          items?: Json;
+          customer_name?: string;
+          customer_phone?: string;
+          customer_email?: string | null;
+          pdf_data?: string | null;
+          created_at?: string;
+          emailed_at?: string | null;
+        };
+      };
+      notification_logs: {
+        Row: {
+          id: string;
+          event_type: string;
+          channel: string;
+          recipient: string;
+          status: string;
+          provider: string;
+          message_preview: string | null;
+          error_message: string | null;
+          attempts: number;
+          booking_code: string | null;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          event_type: string;
+          channel: string;
+          recipient: string;
+          status?: string;
+          provider: string;
+          message_preview?: string | null;
+          error_message?: string | null;
+          attempts?: number;
+          booking_code?: string | null;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          event_type?: string;
+          channel?: string;
+          recipient?: string;
+          status?: string;
+          provider?: string;
+          message_preview?: string | null;
+          error_message?: string | null;
+          attempts?: number;
+          booking_code?: string | null;
+          created_at?: string;
+        };
+      };
+      notification_preferences: {
+        Row: {
+          id: string;
+          user_id: string | null;
+          phone: string | null;
+          email: string | null;
+          sms_enabled: boolean;
+          email_enabled: boolean;
+          whatsapp_enabled: boolean;
+          reminders_enabled: boolean;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          user_id?: string | null;
+          phone?: string | null;
+          email?: string | null;
+          sms_enabled?: boolean;
+          email_enabled?: boolean;
+          whatsapp_enabled?: boolean;
+          reminders_enabled?: boolean;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          user_id?: string | null;
+          phone?: string | null;
+          email?: string | null;
+          sms_enabled?: boolean;
+          email_enabled?: boolean;
+          whatsapp_enabled?: boolean;
+          reminders_enabled?: boolean;
+          created_at?: string;
+          updated_at?: string;
+        };
+      };
     };
     Views: {
       [_ in never]: never;

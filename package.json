@@ -11,7 +11,10 @@
     "seed:kitchen": "tsx scripts/seed-kitchen.ts",
     "seed:menu": "tsx scripts/seed-menu.ts",
     "cleanup:menu": "tsx scripts/remove-menu-items.ts",
-    "test": "tsx tests/kitchen-kds.test.ts"
+    "test": "tsx tests/kitchen-kds.test.ts && tsx tests/payment-and-receipts.test.ts && tsx tests/notifications.test.ts",
+    "test:kds": "tsx tests/kitchen-kds.test.ts",
+    "test:payments": "tsx tests/payment-and-receipts.test.ts",
+    "test:notifications": "tsx tests/notifications.test.ts"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.2.2",
@@ -53,6 +56,7 @@
     "date-fns": "^4.1.0",
     "embla-carousel-react": "^8.6.0",
     "input-otp": "^1.4.2",
+    "jspdf": "^4.2.1",
     "lucide-react": "^0.475.0",
     "react": "^19.0.0",
     "react-day-picker": "^9.5.3",

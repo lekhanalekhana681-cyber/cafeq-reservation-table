@@ -36,8 +36,16 @@ import {
   SlidersHorizontal,
   Image as ImageIcon,
   Sparkles,
+  Bell,
+  Download,
+  Send,
+  Phone,
+  Mail,
+  MessageSquare,
 } from "lucide-react";
 import { toast } from "sonner";
+import { getDeliveryLogs, type DeliveryLogRecord } from "@/lib/notifications";
+import { getReceiptByBookingCode, downloadReceiptPdf, generateReceiptNumber } from "@/lib/receipt.service";
 import {
   getCurrentAdmin,
   logoutAdmin,
@@ -100,8 +108,69 @@ function AdminDashboardPage() {
   const [resettingUser, setResettingUser] = useState<User | null>(null);
   const [resetStaffPasswordInput, setResetStaffPasswordInput] = useState("");
 
-  // Top-level Admin View Tab ("reservations" | "menu")
-  const [activeAdminTab, setActiveAdminTab] = useState<"reservations" | "menu">("reservations");
+  // Top-level Admin View Tab ("reservations" | "menu" | "notifications")
+  const [activeAdminTab, setActiveAdminTab] = useState<"reservations" | "menu" | "notifications">("reservations");
+  const [deliveryLogs, setDeliveryLogs] = useState<DeliveryLogRecord[]>([]);
+  const [loadingLogs, setLoadingLogs] = useState(false);
+  const [logsSearch, setLogsSearch] = useState("");
+  const [logsChannelFilter, setLogsChannelFilter] = useState<string>("all");
+
+  const refreshLogs = () => {
+    setLoadingLogs(true);
+    getDeliveryLogs({ limit: 100 })
+      .then(setDeliveryLogs)
+      .finally(() => setLoadingLogs(false));
+  };
+
+  useEffect(() => {
+    if (activeAdminTab === "notifications") {
+      refreshLogs();
+    }
+  }, [activeAdminTab]);
+
+  const handleAdminDownloadReceipt = async (b: BookingInput) => {
+    try {
+      let receipt = await getReceiptByBookingCode(b.code);
+      if (!receipt) {
+        const total = b.total || 0;
+        const deposit = b.depositAmount || 0;
+        const itemsTotal = Math.max(0, total - deposit);
+        const taxAmount = Math.round(itemsTotal * 0.05 * 100) / 100;
+        const subtotal = Math.max(0, itemsTotal - taxAmount);
+        const cgst = Math.round((taxAmount / 2) * 100) / 100;
+        const sgst = Math.round((taxAmount / 2) * 100) / 100;
+
+        receipt = {
+          id: `rcpt_${b.code}`,
+          receiptNumber: generateReceiptNumber(b.code),
+          bookingCode: b.code,
+          orderId: `order_${b.code}`,
+          paymentId: b.paymentReference || "Prepaid",
+          paymentMethod: b.paymentMethod === "online_razorpay" ? "Razorpay Online" : b.paymentMethod === "upi_prepay" ? "UPI QR Code" : "Cash on Arrival",
+          paymentStatus: (b.paymentStatus as any) === "paid" ? "paid" : "pending",
+          date: b.date,
+          time: b.time,
+          customerName: b.name,
+          customerPhone: b.phone,
+          customerEmail: b.customerEmail,
+          tableType: b.tableType || "Reserved Table",
+          partySize: b.party,
+          items: b.items || [],
+          subtotal,
+          cgst,
+          sgst,
+          taxAmount,
+          depositAmount: deposit,
+          total,
+          createdAt: new Date().toISOString(),
+        };
+      }
+      downloadReceiptPdf(receipt);
+      toast.success(`Downloaded receipt for ${b.code}`);
+    } catch {
+      toast.error("Failed to generate PDF receipt.");
+    }
+  };
 
   // Menu Manager State
   const [menuItems, setMenuItems] = useState<MenuItem[]>([]);
@@ -345,6 +414,37 @@ function AdminDashboardPage() {
     });
   }, [bookings, searchQuery, statusFilter, dateFilter, todayStr]);
 
+  const filteredLogs = useMemo(() => {
+    return deliveryLogs.filter((log) => {
+      if (logsChannelFilter !== "all" && log.channel !== logsChannelFilter) return false;
+      if (logsSearch.trim()) {
+        const query = logsSearch.toLowerCase().trim();
+        const recipient = (log.recipient || "").toLowerCase();
+        const event = (log.event || "").toLowerCase();
+        const subject = (log.subject || "").toLowerCase();
+        const bookingCode = (log.booking_code || "").toLowerCase();
+        if (
+          !recipient.includes(query) &&
+          !event.includes(query) &&
+          !subject.includes(query) &&
+          !bookingCode.includes(query)
+        ) {
+          return false;
+        }
+      }
+      return true;
+    });
+  }, [deliveryLogs, logsChannelFilter, logsSearch]);
+
+  const logMetrics = useMemo(() => {
+    const total = deliveryLogs.length;
+    const sent = deliveryLogs.filter((l) => l.status === "sent" || l.status === "delivered").length;
+    const failed = deliveryLogs.filter((l) => l.status === "failed").length;
+    const retrying = deliveryLogs.filter((l) => l.status === "retrying").length;
+    const rate = total > 0 ? Math.round((sent / total) * 100) : 100;
+    return { total, sent, failed, retrying, rate };
+  }, [deliveryLogs]);
+
   // Menu Item Actions
   const handlePriceDraftChange = (id: string, val: string) => {
     setPriceDrafts((prev) => ({ ...prev, [id]: val }));
@@ -586,6 +686,21 @@ function AdminDashboardPage() {
               <span>Menu & Price Manager</span>
               <span className="rounded-full bg-neutral-950/40 text-[10px] px-2 py-0.5 ml-1">
                 {menuItems.length}
+              </span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveAdminTab("notifications")}
+              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold transition-all ${
+                activeAdminTab === "notifications"
+                  ? "bg-amber-600 text-neutral-950 shadow-md font-bold"
+                  : "text-neutral-400 hover:text-white"
+              }`}
+            >
+              <Bell className="size-4" />
+              <span>Notifications & Logs</span>
+              <span className="rounded-full bg-neutral-950/40 text-[10px] px-2 py-0.5 ml-1">
+                {deliveryLogs.length}
               </span>
             </button>
           </div>
@@ -911,6 +1026,16 @@ function AdminDashboardPage() {
                                     Cancel
                                   </Button>
                                 )}
+
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  onClick={() => handleAdminDownloadReceipt(b)}
+                                  className="h-7 px-2 text-[11px] text-amber-400 hover:text-amber-300 hover:bg-amber-950/50"
+                                  title="Download Digital PDF Receipt"
+                                >
+                                  <Download className="size-3 mr-1" /> Receipt
+                                </Button>
                               </div>
                             </td>
                           </tr>
@@ -1308,6 +1433,221 @@ function AdminDashboardPage() {
                   </table>
                 </div>
               )}
+            </section>
+          </div>
+        )}
+
+        {/* Tab 3: Notifications & Delivery Logs */}
+        {activeAdminTab === "notifications" && (
+          <div className="space-y-6">
+            {/* Notification Statistics KPI Cards */}
+            <section className="grid grid-cols-2 lg:grid-cols-4 gap-3.5 sm:gap-4">
+              <div className="rounded-2xl border border-neutral-800 bg-neutral-900/60 p-4 shadow-sm">
+                <div className="flex items-center justify-between text-neutral-400 text-xs font-medium">
+                  <span>Total Notifications</span>
+                  <Bell className="size-4 text-amber-500" />
+                </div>
+                <p className="mt-2 text-2xl sm:text-3xl font-display font-bold text-white">
+                  {logMetrics.total}
+                </p>
+                <p className="mt-1 text-[11px] text-neutral-500">Across SMS, Email, & WhatsApp</p>
+              </div>
+
+              <div className="rounded-2xl border border-emerald-900/40 bg-emerald-950/20 p-4 shadow-sm">
+                <div className="flex items-center justify-between text-emerald-400 text-xs font-medium">
+                  <span>Delivered / Sent</span>
+                  <CheckCircle2 className="size-4 text-emerald-400" />
+                </div>
+                <p className="mt-2 text-2xl sm:text-3xl font-display font-bold text-emerald-300">
+                  {logMetrics.sent}
+                </p>
+                <p className="mt-1 text-[11px] text-emerald-500/70">Dispatched to guests</p>
+              </div>
+
+              <div className="rounded-2xl border border-rose-900/40 bg-rose-950/20 p-4 shadow-sm">
+                <div className="flex items-center justify-between text-rose-400 text-xs font-medium">
+                  <span>Failed / Retrying</span>
+                  <AlertTriangle className="size-4 text-rose-400" />
+                </div>
+                <p className="mt-2 text-2xl sm:text-3xl font-display font-bold text-rose-300">
+                  {logMetrics.failed + logMetrics.retrying}
+                </p>
+                <p className="mt-1 text-[11px] text-rose-500/70">
+                  {logMetrics.retrying > 0 ? `${logMetrics.retrying} in retry queue` : "Delivery issues"}
+                </p>
+              </div>
+
+              <div className="rounded-2xl border border-blue-900/40 bg-blue-950/20 p-4 shadow-sm">
+                <div className="flex items-center justify-between text-blue-400 text-xs font-medium">
+                  <span>Success Rate</span>
+                  <Send className="size-4 text-blue-400" />
+                </div>
+                <p className="mt-2 text-2xl sm:text-3xl font-display font-bold text-blue-300">
+                  {logMetrics.rate}%
+                </p>
+                <p className="mt-1 text-[11px] text-blue-500/70">Multi-provider delivery rate</p>
+              </div>
+            </section>
+
+            {/* Filter & Search Bar */}
+            <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-4 flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3">
+              <div className="relative flex-1 max-w-md">
+                <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 size-4 text-neutral-500" />
+                <Input
+                  type="text"
+                  value={logsSearch}
+                  onChange={(e) => setLogsSearch(e.target.value)}
+                  placeholder="Search by recipient, booking code, or event..."
+                  className="bg-neutral-950 border-neutral-800 text-neutral-100 placeholder:text-neutral-500 pl-10 h-10 text-xs rounded-xl focus:border-amber-500"
+                />
+              </div>
+
+              <div className="flex items-center gap-2 overflow-x-auto pb-1 md:pb-0">
+                <div className="flex items-center bg-neutral-950 border border-neutral-800 rounded-xl p-1 text-xs">
+                  {[
+                    { id: "all", label: "All Channels" },
+                    { id: "whatsapp", label: "WhatsApp" },
+                    { id: "sms", label: "SMS" },
+                    { id: "email", label: "Email" },
+                  ].map((ch) => (
+                    <button
+                      key={ch.id}
+                      onClick={() => setLogsChannelFilter(ch.id)}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                        logsChannelFilter === ch.id
+                          ? "bg-amber-600 text-neutral-950 font-semibold"
+                          : "text-neutral-400 hover:text-white"
+                      }`}
+                    >
+                      {ch.label}
+                    </button>
+                  ))}
+                </div>
+
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={refreshLogs}
+                  disabled={loadingLogs}
+                  className="bg-neutral-900 border-neutral-800 text-neutral-300 text-xs hover:text-white shrink-0"
+                >
+                  <RefreshCw className={`size-3.5 mr-1 ${loadingLogs ? "animate-spin" : ""}`} /> Refresh
+                </Button>
+              </div>
+            </section>
+
+            {/* Logs Table */}
+            <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 overflow-hidden shadow-xl">
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse text-xs">
+                  <thead>
+                    <tr className="border-b border-neutral-800 bg-neutral-950/60 text-neutral-400 font-semibold">
+                      <th className="py-3 px-4">Time</th>
+                      <th className="py-3 px-4">Channel</th>
+                      <th className="py-3 px-4">Event</th>
+                      <th className="py-3 px-4">Recipient</th>
+                      <th className="py-3 px-4">Subject / Message</th>
+                      <th className="py-3 px-4">Status</th>
+                      <th className="py-3 px-4">Provider</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-neutral-800/60 font-medium">
+                    {filteredLogs.length === 0 ? (
+                      <tr>
+                        <td colSpan={7} className="py-12 text-center text-neutral-500">
+                          <Bell className="size-8 mx-auto mb-2 text-neutral-600" />
+                          <p className="text-sm font-medium">No notification delivery logs found</p>
+                          <p className="text-xs text-neutral-600 mt-1">
+                            Notifications triggered by reservations and orders will appear here in real-time.
+                          </p>
+                        </td>
+                      </tr>
+                    ) : (
+                      filteredLogs.map((log) => {
+                        const dateFormatted = log.created_at
+                          ? new Date(log.created_at).toLocaleTimeString([], {
+                              hour: "2-digit",
+                              minute: "2-digit",
+                              second: "2-digit",
+                            }) +
+                            " · " +
+                            new Date(log.created_at).toLocaleDateString([], {
+                              month: "short",
+                              day: "numeric",
+                            })
+                          : "Just now";
+
+                        return (
+                          <tr key={log.id} className="hover:bg-neutral-800/30 transition-colors">
+                            <td className="py-3.5 px-4 font-mono text-[11px] text-neutral-400 whitespace-nowrap">
+                              {dateFormatted}
+                            </td>
+                            <td className="py-3.5 px-4">
+                              {log.channel === "whatsapp" && (
+                                <Badge className="bg-emerald-950/80 text-emerald-300 border border-emerald-600/50 gap-1 text-[10px]">
+                                  <MessageSquare className="size-3" /> WhatsApp
+                                </Badge>
+                              )}
+                              {log.channel === "sms" && (
+                                <Badge className="bg-amber-950/80 text-amber-300 border border-amber-600/50 gap-1 text-[10px]">
+                                  <Phone className="size-3" /> SMS
+                                </Badge>
+                              )}
+                              {log.channel === "email" && (
+                                <Badge className="bg-blue-950/80 text-blue-300 border border-blue-600/50 gap-1 text-[10px]">
+                                  <Mail className="size-3" /> Email
+                                </Badge>
+                              )}
+                            </td>
+                            <td className="py-3.5 px-4 font-mono text-[11px] text-neutral-300">
+                              <span className="capitalize">{log.event.replace(/_/g, " ")}</span>
+                              {log.booking_code && (
+                                <span className="block text-[10px] text-amber-500 font-mono">
+                                  #{log.booking_code}
+                                </span>
+                              )}
+                            </td>
+                            <td className="py-3.5 px-4 font-mono text-[11px] text-neutral-200">
+                              {log.recipient}
+                            </td>
+                            <td className="py-3.5 px-4 text-neutral-300 max-w-xs truncate">
+                              <span className="font-semibold text-neutral-200">{log.subject || "Alert"}</span>
+                              {log.message && (
+                                <span className="block text-[11px] text-neutral-400 truncate">
+                                  {log.message}
+                                </span>
+                              )}
+                            </td>
+                            <td className="py-3.5 px-4 whitespace-nowrap">
+                              {log.status === "sent" || log.status === "delivered" ? (
+                                <Badge className="bg-emerald-950/80 text-emerald-300 border border-emerald-600/50 text-[10px] gap-1">
+                                  <CheckCircle2 className="size-3" /> {log.status}
+                                </Badge>
+                              ) : log.status === "retrying" ? (
+                                <Badge className="bg-amber-950/80 text-amber-300 border border-amber-600/50 text-[10px] gap-1">
+                                  <Clock className="size-3" /> Retry #{log.retry_count || 1}
+                                </Badge>
+                              ) : (
+                                <Badge className="bg-rose-950/80 text-rose-300 border border-rose-600/50 text-[10px] gap-1">
+                                  <XCircle className="size-3" /> Failed
+                                </Badge>
+                              )}
+                              {log.error_message && (
+                                <span className="block text-[10px] text-rose-400 mt-0.5 truncate max-w-[150px]">
+                                  {log.error_message}
+                                </span>
+                              )}
+                            </td>
+                            <td className="py-3.5 px-4 font-mono text-[10px] text-neutral-500 uppercase">
+                              {log.provider || "simulator"}
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </div>
             </section>
           </div>
         )}
