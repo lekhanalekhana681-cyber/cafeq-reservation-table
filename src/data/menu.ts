@@ -500,19 +500,6 @@ export const menu: MenuItem[] = [
     "prepTimeMinutes": 12
   },
   {
-    "id": "tandoori-chicken-momos",
-    "name": "Tandoori Chicken Momos",
-    "description": "Chicken momos marinated in spicy hung yogurt and roasted over hot tandoor coals.",
-    "price": 189,
-    "category": "Momos (6 pcs)",
-    "isVeg": false,
-    "isAlcoholic": false,
-    "isAvailable": true,
-    "tag": "Chef Special",
-    "image": "/uploads/menu/tandoori-chicken-momos.webp",
-    "prepTimeMinutes": 14
-  },
-  {
     "id": "cheese-corn-momos",
     "name": "Cheese Corn Momos",
     "description": "Gooey mozzarella cheese and sweet golden American corn kernels stuffed in tender dumplings.",
@@ -614,31 +601,6 @@ export const menu: MenuItem[] = [
     "prepTimeMinutes": 14
   },
   {
-    "id": "chicken-wings-6-pcs",
-    "name": "Chicken Wings (6 pcs)",
-    "description": "Crispy fried chicken wings tossed in your choice of smokey BBQ or spicy buffalo glaze.",
-    "price": 249,
-    "category": "Starters & Snacks",
-    "isVeg": false,
-    "isAlcoholic": false,
-    "isAvailable": true,
-    "tag": "Bestseller",
-    "image": "/uploads/menu/chicken-wings-6-pcs.webp",
-    "prepTimeMinutes": 14
-  },
-  {
-    "id": "garlic-bread-with-cheese",
-    "name": "Garlic Bread with Cheese",
-    "description": "Toasted French baguette slathered with roasted garlic butter and smothered in melted mozzarella.",
-    "price": 139,
-    "category": "Starters & Snacks",
-    "isVeg": true,
-    "isAlcoholic": false,
-    "isAvailable": true,
-    "image": "/uploads/menu/garlic-bread-with-cheese.webp",
-    "prepTimeMinutes": 8
-  },
-  {
     "id": "crispy-corn",
     "name": "Crispy Corn",
     "description": "Golden sweet corn kernels flash-fried and wok-tossed with green chilies, peppers, and chaat masala.",
@@ -725,18 +687,6 @@ export const menu: MenuItem[] = [
     "prepTimeMinutes": 10
   },
   {
-    "id": "cheese-chilli-toast",
-    "name": "Cheese Chilli Toast",
-    "description": "Thick crusty bread baked with melted sharp cheddar, chopped spicy green chilies, and fresh cilantro.",
-    "price": 109,
-    "category": "Burgers & Sandwiches",
-    "isVeg": true,
-    "isAlcoholic": false,
-    "isAvailable": true,
-    "image": "/uploads/menu/cheese-chilli-toast.webp",
-    "prepTimeMinutes": 7
-  },
-  {
     "id": "margherita-pizza",
     "name": "Margherita Pizza",
     "description": "Classic hand-stretched crust topped with San Marzano tomato sauce, fresh mozzarella, and sweet basil.",
@@ -773,18 +723,6 @@ export const menu: MenuItem[] = [
     "tag": "House Special",
     "image": "/uploads/menu/pepperoni-pizza.webp",
     "prepTimeMinutes": 15
-  },
-  {
-    "id": "white-sauce-pasta",
-    "name": "White Sauce Pasta",
-    "description": "Penne pasta enveloped in velvety rich garlic Parmesan cream sauce with sauteed mushrooms.",
-    "price": 219,
-    "category": "Pizza & Pasta",
-    "isVeg": true,
-    "isAlcoholic": false,
-    "isAvailable": true,
-    "image": "/uploads/menu/white-sauce-pasta.webp",
-    "prepTimeMinutes": 12
   },
   {
     "id": "red-sauce-pasta",
@@ -1034,18 +972,6 @@ export const menu: MenuItem[] = [
     "isAvailable": true,
     "image": "/uploads/menu/cardamom-orange-knot.webp",
     "prepTimeMinutes": 2
-  },
-  {
-    "id": "brown-butter-banana-bread",
-    "name": "Brown Butter Banana Bread",
-    "description": "Toasted slice served warm with sea salt whipped honey butter.",
-    "price": 149,
-    "category": "Bakery & Desserts",
-    "isVeg": true,
-    "isAlcoholic": false,
-    "isAvailable": true,
-    "image": "/uploads/menu/brown-butter-banana-bread.webp",
-    "prepTimeMinutes": 4
   },
   {
     "id": "artisanal-margherita-sourdough-pizza",

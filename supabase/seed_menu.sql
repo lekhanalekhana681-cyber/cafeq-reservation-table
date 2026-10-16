@@ -1,5 +1,5 @@
 -- Idempotent Menu Items Seed
--- Generated on 2026-10-15T19:10:39.946Z
+-- Generated on 2026-10-16T04:22:17.841Z
 
 -- Ensure columns exist in menu_items
 ALTER TABLE IF EXISTS menu_items ADD COLUMN IF NOT EXISTS is_veg BOOLEAN DEFAULT TRUE;
@@ -550,20 +550,6 @@ ON CONFLICT (name) DO UPDATE SET
   updated_at = NOW();
 
 INSERT INTO menu_items (name, category, price, description, is_veg, is_alcoholic, is_available, image_url, tag, prep_time_minutes, updated_at)
-VALUES ('Tandoori Chicken Momos', 'Momos (6 pcs)', 189, 'Chicken momos marinated in spicy hung yogurt and roasted over hot tandoor coals.', false, false, true, '/uploads/menu/tandoori-chicken-momos.webp', 'Chef Special', 14, NOW())
-ON CONFLICT (name) DO UPDATE SET
-  category = EXCLUDED.category,
-  price = EXCLUDED.price,
-  description = EXCLUDED.description,
-  is_veg = EXCLUDED.is_veg,
-  is_alcoholic = EXCLUDED.is_alcoholic,
-  is_available = EXCLUDED.is_available,
-  image_url = EXCLUDED.image_url,
-  tag = EXCLUDED.tag,
-  prep_time_minutes = EXCLUDED.prep_time_minutes,
-  updated_at = NOW();
-
-INSERT INTO menu_items (name, category, price, description, is_veg, is_alcoholic, is_available, image_url, tag, prep_time_minutes, updated_at)
 VALUES ('Cheese Corn Momos', 'Momos (6 pcs)', 149, 'Gooey mozzarella cheese and sweet golden American corn kernels stuffed in tender dumplings.', true, false, true, '/uploads/menu/cheese-corn-momos.webp', NULL, 10, NOW())
 ON CONFLICT (name) DO UPDATE SET
   category = EXCLUDED.category,
@@ -676,34 +662,6 @@ ON CONFLICT (name) DO UPDATE SET
   updated_at = NOW();
 
 INSERT INTO menu_items (name, category, price, description, is_veg, is_alcoholic, is_available, image_url, tag, prep_time_minutes, updated_at)
-VALUES ('Chicken Wings (6 pcs)', 'Starters & Snacks', 249, 'Crispy fried chicken wings tossed in your choice of smokey BBQ or spicy buffalo glaze.', false, false, true, '/uploads/menu/chicken-wings-6-pcs.webp', 'Bestseller', 14, NOW())
-ON CONFLICT (name) DO UPDATE SET
-  category = EXCLUDED.category,
-  price = EXCLUDED.price,
-  description = EXCLUDED.description,
-  is_veg = EXCLUDED.is_veg,
-  is_alcoholic = EXCLUDED.is_alcoholic,
-  is_available = EXCLUDED.is_available,
-  image_url = EXCLUDED.image_url,
-  tag = EXCLUDED.tag,
-  prep_time_minutes = EXCLUDED.prep_time_minutes,
-  updated_at = NOW();
-
-INSERT INTO menu_items (name, category, price, description, is_veg, is_alcoholic, is_available, image_url, tag, prep_time_minutes, updated_at)
-VALUES ('Garlic Bread with Cheese', 'Starters & Snacks', 139, 'Toasted French baguette slathered with roasted garlic butter and smothered in melted mozzarella.', true, false, true, '/uploads/menu/garlic-bread-with-cheese.webp', NULL, 8, NOW())
-ON CONFLICT (name) DO UPDATE SET
-  category = EXCLUDED.category,
-  price = EXCLUDED.price,
-  description = EXCLUDED.description,
-  is_veg = EXCLUDED.is_veg,
-  is_alcoholic = EXCLUDED.is_alcoholic,
-  is_available = EXCLUDED.is_available,
-  image_url = EXCLUDED.image_url,
-  tag = EXCLUDED.tag,
-  prep_time_minutes = EXCLUDED.prep_time_minutes,
-  updated_at = NOW();
-
-INSERT INTO menu_items (name, category, price, description, is_veg, is_alcoholic, is_available, image_url, tag, prep_time_minutes, updated_at)
 VALUES ('Crispy Corn', 'Starters & Snacks', 149, 'Golden sweet corn kernels flash-fried and wok-tossed with green chilies, peppers, and chaat masala.', true, false, true, '/uploads/menu/crispy-corn.webp', NULL, 8, NOW())
 ON CONFLICT (name) DO UPDATE SET
   category = EXCLUDED.category,
@@ -802,20 +760,6 @@ ON CONFLICT (name) DO UPDATE SET
   updated_at = NOW();
 
 INSERT INTO menu_items (name, category, price, description, is_veg, is_alcoholic, is_available, image_url, tag, prep_time_minutes, updated_at)
-VALUES ('Cheese Chilli Toast', 'Burgers & Sandwiches', 109, 'Thick crusty bread baked with melted sharp cheddar, chopped spicy green chilies, and fresh cilantro.', true, false, true, '/uploads/menu/cheese-chilli-toast.webp', NULL, 7, NOW())
-ON CONFLICT (name) DO UPDATE SET
-  category = EXCLUDED.category,
-  price = EXCLUDED.price,
-  description = EXCLUDED.description,
-  is_veg = EXCLUDED.is_veg,
-  is_alcoholic = EXCLUDED.is_alcoholic,
-  is_available = EXCLUDED.is_available,
-  image_url = EXCLUDED.image_url,
-  tag = EXCLUDED.tag,
-  prep_time_minutes = EXCLUDED.prep_time_minutes,
-  updated_at = NOW();
-
-INSERT INTO menu_items (name, category, price, description, is_veg, is_alcoholic, is_available, image_url, tag, prep_time_minutes, updated_at)
 VALUES ('Margherita Pizza', 'Pizza & Pasta', 249, 'Classic hand-stretched crust topped with San Marzano tomato sauce, fresh mozzarella, and sweet basil.', true, false, true, '/uploads/menu/margherita-pizza.webp', 'Italian Classic', 15, NOW())
 ON CONFLICT (name) DO UPDATE SET
   category = EXCLUDED.category,
@@ -845,20 +789,6 @@ ON CONFLICT (name) DO UPDATE SET
 
 INSERT INTO menu_items (name, category, price, description, is_veg, is_alcoholic, is_available, image_url, tag, prep_time_minutes, updated_at)
 VALUES ('Pepperoni Pizza', 'Pizza & Pasta', 349, 'Crispy crust layered with tomato sauce, mozzarella, and cured spicy pepperoni slices.', false, false, true, '/uploads/menu/pepperoni-pizza.webp', 'House Special', 15, NOW())
-ON CONFLICT (name) DO UPDATE SET
-  category = EXCLUDED.category,
-  price = EXCLUDED.price,
-  description = EXCLUDED.description,
-  is_veg = EXCLUDED.is_veg,
-  is_alcoholic = EXCLUDED.is_alcoholic,
-  is_available = EXCLUDED.is_available,
-  image_url = EXCLUDED.image_url,
-  tag = EXCLUDED.tag,
-  prep_time_minutes = EXCLUDED.prep_time_minutes,
-  updated_at = NOW();
-
-INSERT INTO menu_items (name, category, price, description, is_veg, is_alcoholic, is_available, image_url, tag, prep_time_minutes, updated_at)
-VALUES ('White Sauce Pasta', 'Pizza & Pasta', 219, 'Penne pasta enveloped in velvety rich garlic Parmesan cream sauce with sauteed mushrooms.', true, false, true, '/uploads/menu/white-sauce-pasta.webp', NULL, 12, NOW())
 ON CONFLICT (name) DO UPDATE SET
   category = EXCLUDED.category,
   price = EXCLUDED.price,
@@ -1139,20 +1069,6 @@ ON CONFLICT (name) DO UPDATE SET
 
 INSERT INTO menu_items (name, category, price, description, is_veg, is_alcoholic, is_available, image_url, tag, prep_time_minutes, updated_at)
 VALUES ('Cardamom Orange Knot', 'Bakery & Desserts', 139, 'Braided Swedish bun with freshly ground cardamom & orange zest.', true, false, true, '/uploads/menu/cardamom-orange-knot.webp', NULL, 2, NOW())
-ON CONFLICT (name) DO UPDATE SET
-  category = EXCLUDED.category,
-  price = EXCLUDED.price,
-  description = EXCLUDED.description,
-  is_veg = EXCLUDED.is_veg,
-  is_alcoholic = EXCLUDED.is_alcoholic,
-  is_available = EXCLUDED.is_available,
-  image_url = EXCLUDED.image_url,
-  tag = EXCLUDED.tag,
-  prep_time_minutes = EXCLUDED.prep_time_minutes,
-  updated_at = NOW();
-
-INSERT INTO menu_items (name, category, price, description, is_veg, is_alcoholic, is_available, image_url, tag, prep_time_minutes, updated_at)
-VALUES ('Brown Butter Banana Bread', 'Bakery & Desserts', 149, 'Toasted slice served warm with sea salt whipped honey butter.', true, false, true, '/uploads/menu/brown-butter-banana-bread.webp', NULL, 4, NOW())
 ON CONFLICT (name) DO UPDATE SET
   category = EXCLUDED.category,
   price = EXCLUDED.price,

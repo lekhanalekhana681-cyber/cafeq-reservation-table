@@ -322,9 +322,9 @@ function HistoryPage() {
                           className="flex items-center justify-between rounded-xl bg-secondary/50 px-3.5 py-2 text-xs"
                         >
                           <span className="font-medium text-foreground">
-                            {it.qty} × {it.name}
+                            {it.qty ?? 1} × {it.name || it.id}
                           </span>
-                          <span className="text-accent font-semibold">₹{it.price * it.qty}</span>
+                          <span className="text-accent font-semibold">₹{(it.price ?? 0) * (it.qty ?? 1)}</span>
                         </div>
                       ))}
                       {atTable.map((it) => (
@@ -333,9 +333,9 @@ function HistoryPage() {
                           className="flex items-center justify-between rounded-xl bg-secondary/20 border border-border/50 px-3.5 py-2 text-xs"
                         >
                           <span className="text-muted-foreground">
-                            {it.qty} × {it.name} (At Table)
+                            {it.qty ?? 1} × {it.name || it.id} (At Table)
                           </span>
-                          <span className="text-muted-foreground">₹{it.price * it.qty}</span>
+                          <span className="text-muted-foreground">₹{(it.price ?? 0) * (it.qty ?? 1)}</span>
                         </div>
                       ))}
                     </div>

@@ -264,18 +264,29 @@ function ReservePage() {
         if (decoded.phone) setPhone(decoded.phone);
         if (decoded.items && Array.isArray(decoded.items)) {
           const newCart: Record<string, CartItemState> = {};
-          decoded.items.forEach((it: { id: string; qty: number; fulfillment?: "pre_ordered" | "at_table" }) => {
-            newCart[it.id] = { qty: it.qty, fulfillment: it.fulfillment || "pre_ordered" };
+          const removedNames: string[] = [];
+          decoded.items.forEach((it: { id: string; name?: string; qty: number; fulfillment?: "pre_ordered" | "at_table" }) => {
+            const exists = menuItems.some((m) => m.id === it.id);
+            if (exists) {
+              newCart[it.id] = { qty: it.qty, fulfillment: it.fulfillment || "pre_ordered" };
+            } else {
+              removedNames.push(it.name || it.id);
+            }
           });
           setCart(newCart);
-          setWantFoodOnArrival(true);
+          setWantFoodOnArrival(Object.keys(newCart).length > 0);
+          if (removedNames.length > 0) {
+            toast.warning(
+              `Some items from your previous booking (${removedNames.join(", ")}) are no longer on the menu and were removed.`
+            );
+          }
         }
         toast.info("Pre-filled your previous booking & favorite items!");
       } catch (err) {
         console.error("Failed to parse rebook query:", err);
       }
     }
-  }, [search.rebook]);
+  }, [search.rebook, menuItems]);
 
   const slotEvaluation = useMemo(() => {
     return evaluateSlotAndCustomer({
@@ -290,18 +301,18 @@ function ReservePage() {
   const items: OrderItem[] = useMemo(() => {
     if (!wantFoodOnArrival) return [];
     return Object.entries(cart)
-      .filter(([_, state]) => state.qty > 0)
+      .filter(([id, state]) => state.qty > 0 && menuItems.some((m) => m.id === id))
       .map(([id, state]) => {
-        const menuItem = menuItems.find((m) => m.id === id);
+        const menuItem = menuItems.find((m) => m.id === id)!;
         return {
           id,
-          name: menuItem ? menuItem.name : id,
+          name: menuItem.name,
           qty: state.qty,
-          price: menuItem ? inr(menuItem.price) : 0,
-          prepTimeMinutes: menuItem ? menuItem.prepTimeMinutes : 5,
+          price: inr(menuItem.price),
+          prepTimeMinutes: menuItem.prepTimeMinutes,
           fulfillment: state.fulfillment,
-          category: menuItem?.category,
-          image: menuItem?.image || "/uploads/menu/placeholder.webp",
+          category: menuItem.category,
+          image: menuItem.image || "/uploads/menu/placeholder.webp",
         };
       });
   }, [cart, wantFoodOnArrival, menuItems]);

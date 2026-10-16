@@ -406,17 +406,7 @@ const MENU_DATA: RawMenuItem[] = [
     prepTimeMinutes: 12,
     photoId: "photo-1541696432-82c6da8ce7bf",
   },
-  {
-    name: "Tandoori Chicken Momos",
-    category: "Momos (6 pcs)",
-    price: 189,
-    description: "Chicken momos marinated in spicy hung yogurt and roasted over hot tandoor coals.",
-    isVeg: false,
-    tag: "Chef Special",
-    prepTimeMinutes: 14,
-    photoId: "photo-1599488615731-7e5c2823ff28",
-  },
-  {
+    {
     name: "Cheese Corn Momos",
     category: "Momos (6 pcs)",
     price: 149,
@@ -495,26 +485,7 @@ const MENU_DATA: RawMenuItem[] = [
     prepTimeMinutes: 14,
     photoId: "photo-1567188040759-fb8a883dc6d8",
   },
-  {
-    name: "Chicken Wings (6 pcs)",
-    category: "Starters & Snacks",
-    price: 249,
-    description: "Crispy fried chicken wings tossed in your choice of smokey BBQ or spicy buffalo glaze.",
-    isVeg: false,
-    tag: "Bestseller",
-    prepTimeMinutes: 14,
-    photoId: "photo-1527477378408-1bc0607d727b",
-  },
-  {
-    name: "Garlic Bread with Cheese",
-    category: "Starters & Snacks",
-    price: 139,
-    description: "Toasted French baguette slathered with roasted garlic butter and smothered in melted mozzarella.",
-    isVeg: true,
-    prepTimeMinutes: 8,
-    photoId: "photo-1573140247632-f8fd74997d5c",
-  },
-  {
+      {
     name: "Crispy Corn",
     category: "Starters & Snacks",
     price: 149,
@@ -581,16 +552,7 @@ const MENU_DATA: RawMenuItem[] = [
     prepTimeMinutes: 10,
     photoId: "photo-1509722747041-616f39b57569",
   },
-  {
-    name: "Cheese Chilli Toast",
-    category: "Burgers & Sandwiches",
-    price: 109,
-    description: "Thick crusty bread baked with melted sharp cheddar, chopped spicy green chilies, and fresh cilantro.",
-    isVeg: true,
-    prepTimeMinutes: 7,
-    photoId: "photo-1573140247632-f8fd74997d5c",
-  },
-
+  
   // ─── Pizza & Pasta ───
   {
     name: "Margherita Pizza",
@@ -621,16 +583,7 @@ const MENU_DATA: RawMenuItem[] = [
     prepTimeMinutes: 15,
     photoId: "photo-1628840042765-356cda07504e",
   },
-  {
-    name: "White Sauce Pasta",
-    category: "Pizza & Pasta",
-    price: 219,
-    description: "Penne pasta enveloped in velvety rich garlic Parmesan cream sauce with sauteed mushrooms.",
-    isVeg: true,
-    prepTimeMinutes: 12,
-    photoId: "photo-1621996346565-e3d5d62810a9",
-  },
-  {
+    {
     name: "Red Sauce Pasta",
     category: "Pizza & Pasta",
     price: 209,
@@ -823,16 +776,7 @@ const MENU_DATA: RawMenuItem[] = [
     prepTimeMinutes: 2,
     photoId: "photo-1509440159596-0249088772ff",
   },
-  {
-    name: "Brown Butter Banana Bread",
-    category: "Bakery & Desserts",
-    price: 149,
-    description: "Toasted slice served warm with sea salt whipped honey butter.",
-    isVeg: true,
-    prepTimeMinutes: 4,
-    photoId: "photo-1605698802011-b51608985ef4",
-  },
-  {
+    {
     name: "Artisanal Margherita Sourdough Pizza",
     category: "Artisanal Mains",
     price: 289,

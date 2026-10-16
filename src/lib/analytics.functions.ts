@@ -64,13 +64,16 @@ export async function getCafeAnalytics(): Promise<CafeAnalytics> {
   });
   const repeatCustomersCount = Object.values(phoneCounts).filter((c) => c > 1).length;
 
-  // Item counts
+  // Item counts (grounded in historical snapshots)
   const itemMap: Record<string, { count: number; revenue: number }> = {};
   allBookings.forEach((b) => {
     b.items?.forEach((it) => {
+      if (!it || !it.name) return;
       if (!itemMap[it.name]) itemMap[it.name] = { count: 0, revenue: 0 };
-      itemMap[it.name]!.count += it.qty;
-      itemMap[it.name]!.revenue += it.price * it.qty;
+      const qty = typeof it.qty === "number" && it.qty > 0 ? it.qty : 1;
+      const price = typeof it.price === "number" ? it.price : 0;
+      itemMap[it.name]!.count += qty;
+      itemMap[it.name]!.revenue += price * qty;
     });
   });
 

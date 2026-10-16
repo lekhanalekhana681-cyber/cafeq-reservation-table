@@ -10,6 +10,7 @@
     "seed:admin": "tsx scripts/seed-admin.ts",
     "seed:kitchen": "tsx scripts/seed-kitchen.ts",
     "seed:menu": "tsx scripts/seed-menu.ts",
+    "cleanup:menu": "tsx scripts/remove-menu-items.ts",
     "test": "tsx tests/kitchen-kds.test.ts"
   },
   "dependencies": {

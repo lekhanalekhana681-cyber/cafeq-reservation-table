@@ -51,6 +51,13 @@ export function getStoredMenu(): MenuItem[] {
       return baseItem;
     });
 
+    // Purge any saved items that are no longer in initialMenu
+    const initialIds = new Set(initialMenu.map((i) => i.id));
+    const cleanedSaved = savedItems.filter((i) => initialIds.has(i.id));
+    if (cleanedSaved.length !== savedItems.length) {
+      localStorage.setItem(STORAGE_MENU_ITEMS_KEY, JSON.stringify(cleanedSaved));
+    }
+
     return merged;
   } catch (err) {
     console.error("Failed to read menu from storage:", err);
