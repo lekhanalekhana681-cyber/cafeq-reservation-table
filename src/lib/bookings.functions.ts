@@ -6,6 +6,8 @@ import { sendWhatsAppMessage, sendSms } from "@/lib/notifications.functions";
 import { dispatchNotification } from "@/lib/notifications";
 import { verifyRazorpayPaymentSignature } from "@/lib/razorpay.service";
 import { storeReceipt, generateReceiptNumber } from "@/lib/receipt.service";
+import { createAdminNotification } from "@/lib/admin-notifications";
+import { logActivity } from "@/lib/audit-logs";
 
 export const orderItemSchema = z.object({
   id: z.string(),
@@ -225,6 +227,24 @@ export async function createBooking({ data }: { data: BookingInput }) {
     itemsSummary,
     totalAmount: validated.total,
   }).catch((err) => console.warn("Background confirmation notification error:", err));
+
+  // Create in-app admin notification for management console
+  createAdminNotification({
+    title: "New Reservation",
+    message: `New reservation by ${validated.name} for ${validated.date} at ${validated.time} (${validated.party} ${validated.party === 1 ? "guest" : "guests"}, Table: ${validated.tableType})`,
+    type: "reservation",
+    bookingCode: validated.code,
+    customerName: validated.name,
+  }).catch((err) => console.warn("Admin notification creation error:", err));
+
+  // Record key system activity log
+  logActivity({
+    user: validated.name || "Customer",
+    action: "RESERVATION_CREATED",
+    category: "reservation",
+    details: `Reservation #${validated.code} booked for ${validated.date} at ${validated.time} (${validated.party} guests, Table: ${validated.tableType}, ${validated.paymentMethod})`,
+    status: "success",
+  }).catch((err) => console.warn("Activity logging error:", err));
 
   return { code: validated.code };
 }
@@ -511,6 +531,22 @@ export async function cancelBooking({
       time: targetBooking.time,
       cancellationReason: reason || "Customer requested cancellation",
     }).catch((err) => console.warn("Cancellation notification error:", err));
+
+    createAdminNotification({
+      title: "Reservation Cancelled",
+      message: `Reservation #${code} for ${targetBooking.name} was cancelled${reason ? ` (${reason})` : ""}`,
+      type: "cancellation",
+      bookingCode: code,
+      customerName: targetBooking.name,
+    }).catch((err) => console.warn("Admin notification error:", err));
+
+    logActivity({
+      user: targetBooking.name || "Customer",
+      action: "RESERVATION_CANCELLED",
+      category: "reservation",
+      details: `Reservation #${code} was cancelled${reason ? `: ${reason}` : ""}`,
+      status: "warning",
+    }).catch((err) => console.warn("Activity logging error:", err));
   }
 
   return { success: true };

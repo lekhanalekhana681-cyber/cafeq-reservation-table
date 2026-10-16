@@ -42,9 +42,28 @@ import {
   Phone,
   Mail,
   MessageSquare,
+  Trash2,
+  CheckCheck,
+  Activity,
+  FileText,
+  Info,
 } from "lucide-react";
 import { toast } from "sonner";
 import { getDeliveryLogs, type DeliveryLogRecord } from "@/lib/notifications";
+import {
+  getAdminNotifications,
+  markNotificationAsRead,
+  markAllNotificationsAsRead,
+  clearAllNotifications,
+  getUnreadNotificationsCount,
+  type AdminNotification,
+} from "@/lib/admin-notifications";
+import {
+  getAuditLogs,
+  logActivity,
+  clearAuditLogs,
+  type AuditLogRecord,
+} from "@/lib/audit-logs";
 import { getReceiptByBookingCode, downloadReceiptPdf, generateReceiptNumber } from "@/lib/receipt.service";
 import {
   getCurrentAdmin,
@@ -77,6 +96,9 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 
 export const Route = createFileRoute("/admin/")({
+  validateSearch: (search: Record<string, unknown>): { tab?: string } => ({
+    tab: (search["tab"] as string) || undefined,
+  }),
   component: AdminDashboardPage,
 });
 
@@ -108,8 +130,97 @@ function AdminDashboardPage() {
   const [resettingUser, setResettingUser] = useState<User | null>(null);
   const [resetStaffPasswordInput, setResetStaffPasswordInput] = useState("");
 
-  // Top-level Admin View Tab ("reservations" | "menu" | "notifications")
-  const [activeAdminTab, setActiveAdminTab] = useState<"reservations" | "menu" | "notifications">("reservations");
+  const searchParams = Route.useSearch();
+  // Top-level Admin View Tab ("reservations" | "menu" | "notifications" | "logs")
+  const [activeAdminTab, setActiveAdminTab] = useState<"reservations" | "menu" | "notifications" | "logs">(
+    (["reservations", "menu", "notifications", "logs"].includes(searchParams.tab as string)
+      ? (searchParams.tab as any)
+      : "reservations")
+  );
+
+  useEffect(() => {
+    if (searchParams.tab && ["reservations", "menu", "notifications", "logs"].includes(searchParams.tab)) {
+      setActiveAdminTab(searchParams.tab as any);
+    }
+  }, [searchParams.tab]);
+
+  const handleSelectAdminTab = (tab: "reservations" | "menu" | "notifications" | "logs") => {
+    setActiveAdminTab(tab);
+    navigate({ search: { tab } });
+  };
+
+  // ─── Admin Notifications State ───────────────────────────────────────────────
+  const [notifications, setNotifications] = useState<AdminNotification[]>([]);
+  const [unreadNotifCount, setUnreadNotifCount] = useState<number>(0);
+  const [loadingNotifications, setLoadingNotifications] = useState(false);
+  const [notifFilter, setNotifFilter] = useState<"all" | "unread">("all");
+
+  const loadNotificationsData = async () => {
+    setLoadingNotifications(true);
+    try {
+      const list = await getAdminNotifications();
+      setNotifications(list);
+      const unread = await getUnreadNotificationsCount();
+      setUnreadNotifCount(unread);
+    } catch (err) {
+      console.error("Failed to load admin notifications:", err);
+    } finally {
+      setLoadingNotifications(false);
+    }
+  };
+
+  const handleMarkAllRead = async () => {
+    await markAllNotificationsAsRead();
+    toast.success("All notifications marked as read.");
+    await loadNotificationsData();
+  };
+
+  const handleClearAllNotifications = async () => {
+    if (window.confirm("Are you sure you want to clear all notifications?")) {
+      await clearAllNotifications();
+      toast.success("Notifications cleared.");
+      await loadNotificationsData();
+    }
+  };
+
+  const handleMarkOneRead = async (id: string) => {
+    await markNotificationAsRead(id);
+    await loadNotificationsData();
+  };
+
+  // ─── Activity Audit Logs State ───────────────────────────────────────────────
+  const [auditLogs, setAuditLogs] = useState<AuditLogRecord[]>([]);
+  const [loadingAuditLogs, setLoadingAuditLogs] = useState(false);
+  const [auditSearch, setAuditSearch] = useState("");
+  const [auditDateFilter, setAuditDateFilter] = useState("");
+  const [auditCategoryFilter, setAuditCategoryFilter] = useState<string>("all");
+  const [logsViewMode, setLogsViewMode] = useState<"activity" | "delivery">("activity");
+
+  const loadAuditLogsData = async () => {
+    setLoadingAuditLogs(true);
+    try {
+      const data = await getAuditLogs({
+        search: auditSearch,
+        date: auditDateFilter,
+        category: auditCategoryFilter,
+      });
+      setAuditLogs(data);
+    } catch (err) {
+      console.error("Failed to load activity logs:", err);
+    } finally {
+      setLoadingAuditLogs(false);
+    }
+  };
+
+  const handleClearAuditLogs = async () => {
+    if (window.confirm("Are you sure you want to clear all activity logs?")) {
+      await clearAuditLogs();
+      toast.success("Activity logs cleared.");
+      await loadAuditLogsData();
+    }
+  };
+
+  // ─── Delivery Telemetry Logs (SMS/Email/WhatsApp) ───────────────────────────
   const [deliveryLogs, setDeliveryLogs] = useState<DeliveryLogRecord[]>([]);
   const [loadingLogs, setLoadingLogs] = useState(false);
   const [logsSearch, setLogsSearch] = useState("");
@@ -122,11 +233,32 @@ function AdminDashboardPage() {
       .finally(() => setLoadingLogs(false));
   };
 
+  // Initial load and real-time event subscriptions
+  useEffect(() => {
+    loadNotificationsData();
+    loadAuditLogsData();
+    refreshLogs();
+
+    const handleNotifEvent = () => loadNotificationsData();
+    const handleAuditLogEvent = () => loadAuditLogsData();
+
+    window.addEventListener("cafeq_notification_update", handleNotifEvent);
+    window.addEventListener("cafeq_audit_log_update", handleAuditLogEvent);
+
+    return () => {
+      window.removeEventListener("cafeq_notification_update", handleNotifEvent);
+      window.removeEventListener("cafeq_audit_log_update", handleAuditLogEvent);
+    };
+  }, []);
+
   useEffect(() => {
     if (activeAdminTab === "notifications") {
+      loadNotificationsData();
+    } else if (activeAdminTab === "logs") {
+      loadAuditLogsData();
       refreshLogs();
     }
-  }, [activeAdminTab]);
+  }, [activeAdminTab, auditSearch, auditDateFilter, auditCategoryFilter]);
 
   const handleAdminDownloadReceipt = async (b: BookingInput) => {
     try {
@@ -354,6 +486,23 @@ function AdminDashboardPage() {
       setBookings((prev) =>
         prev.map((b) => (b.code === code ? { ...b, status: newStatus } : b))
       );
+
+      logActivity({
+        user: admin?.name || "Admin",
+        action: newStatus === "cancelled" ? "RESERVATION_CANCELLED" : "RESERVATION_STATUS_UPDATED",
+        category: "reservation",
+        details: `Reservation #${code} status updated to "${newStatus}"`,
+        status: newStatus === "cancelled" ? "warning" : "success",
+      }).catch(() => {});
+
+      if (newStatus === "cancelled") {
+        createAdminNotification({
+          title: "Reservation Cancelled",
+          message: `Reservation #${code} was marked as cancelled by ${admin?.name || "Admin"}`,
+          type: "cancellation",
+          bookingCode: code,
+        }).catch(() => {});
+      }
     } catch {
       toast.error("Failed to update booking status.");
     } finally {
@@ -461,6 +610,13 @@ function AdminDashboardPage() {
     const success = updateMenuItemPrice(item.id, numPrice);
     if (success) {
       toast.success(`Updated "${item.name}" price to ₹${Math.round(numPrice)}`);
+      logActivity({
+        user: admin?.name || "Admin",
+        action: "MENU_PRICE_UPDATED",
+        category: "menu",
+        details: `Updated price of "${item.name}" from ₹${item.price} to ₹${Math.round(numPrice)}`,
+        status: "success",
+      }).catch(() => {});
       setPriceDrafts((prev) => {
         const next = { ...prev };
         delete next[item.id];
@@ -476,6 +632,13 @@ function AdminDashboardPage() {
   const handleToggleItemAvailability = (item: MenuItem) => {
     const nextAvailability = !item.isAvailable;
     updateMenuItem(item.id, { isAvailable: nextAvailability });
+    logActivity({
+      user: admin?.name || "Admin",
+      action: "MENU_AVAILABILITY_CHANGED",
+      category: "menu",
+      details: `"${item.name}" stock availability set to ${nextAvailability ? "In Stock" : "86'd / Sold Out"}`,
+      status: "success",
+    }).catch(() => {});
     toast.success(
       `"${item.name}" is now marked ${nextAvailability ? "In Stock" : "86'd / Out of Stock"}`
     );
@@ -486,6 +649,13 @@ function AdminDashboardPage() {
     const next = !hideCocktails;
     setCocktailsCategoryHidden(next);
     setHideCocktails(next);
+    logActivity({
+      user: admin?.name || "Admin",
+      action: "SYSTEM_SETTINGS_CHANGED",
+      category: "system",
+      details: `Cocktails 18+ category toggled ${next ? "HIDDEN (License Offline)" : "ACTIVE"}`,
+      status: "success",
+    }).catch(() => {});
     if (next) {
       toast.warning("Cocktails category HIDDEN from customer menu (Liquor license offline).");
     } else {
@@ -657,11 +827,11 @@ function AdminDashboardPage() {
 
         {/* Admin Navigation Tabs */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-neutral-800 pb-4">
-          <div className="flex items-center gap-2 rounded-2xl bg-neutral-900 p-1.5 border border-neutral-800">
+          <div className="flex flex-wrap items-center gap-2 rounded-2xl bg-neutral-900 p-1.5 border border-neutral-800">
             <button
               type="button"
-              onClick={() => setActiveAdminTab("reservations")}
-              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold transition-all ${
+              onClick={() => handleSelectAdminTab("reservations")}
+              className={`flex items-center gap-2 px-3.5 sm:px-4 py-2 rounded-xl text-xs font-semibold transition-all ${
                 activeAdminTab === "reservations"
                   ? "bg-amber-600 text-neutral-950 shadow-md font-bold"
                   : "text-neutral-400 hover:text-white"
@@ -675,8 +845,8 @@ function AdminDashboardPage() {
             </button>
             <button
               type="button"
-              onClick={() => setActiveAdminTab("menu")}
-              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold transition-all ${
+              onClick={() => handleSelectAdminTab("menu")}
+              className={`flex items-center gap-2 px-3.5 sm:px-4 py-2 rounded-xl text-xs font-semibold transition-all ${
                 activeAdminTab === "menu"
                   ? "bg-amber-600 text-neutral-950 shadow-md font-bold"
                   : "text-neutral-400 hover:text-white"
@@ -690,17 +860,38 @@ function AdminDashboardPage() {
             </button>
             <button
               type="button"
-              onClick={() => setActiveAdminTab("notifications")}
-              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold transition-all ${
+              onClick={() => handleSelectAdminTab("notifications")}
+              className={`flex items-center gap-2 px-3.5 sm:px-4 py-2 rounded-xl text-xs font-semibold transition-all ${
                 activeAdminTab === "notifications"
                   ? "bg-amber-600 text-neutral-950 shadow-md font-bold"
                   : "text-neutral-400 hover:text-white"
               }`}
             >
               <Bell className="size-4" />
-              <span>Notifications & Logs</span>
+              <span>Notifications</span>
+              {unreadNotifCount > 0 ? (
+                <span className="rounded-full bg-amber-500 text-neutral-950 text-[10px] font-bold px-2 py-0.5 ml-1 animate-pulse">
+                  {unreadNotifCount} new
+                </span>
+              ) : (
+                <span className="rounded-full bg-neutral-950/40 text-[10px] px-2 py-0.5 ml-1">
+                  {notifications.length}
+                </span>
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={() => handleSelectAdminTab("logs")}
+              className={`flex items-center gap-2 px-3.5 sm:px-4 py-2 rounded-xl text-xs font-semibold transition-all ${
+                activeAdminTab === "logs"
+                  ? "bg-amber-600 text-neutral-950 shadow-md font-bold"
+                  : "text-neutral-400 hover:text-white"
+              }`}
+            >
+              <Activity className="size-4" />
+              <span>Logs</span>
               <span className="rounded-full bg-neutral-950/40 text-[10px] px-2 py-0.5 ml-1">
-                {deliveryLogs.length}
+                {auditLogs.length}
               </span>
             </button>
           </div>
@@ -1437,218 +1628,628 @@ function AdminDashboardPage() {
           </div>
         )}
 
-        {/* Tab 3: Notifications & Delivery Logs */}
+        {/* ── Tab 3: Admin Notifications ───────────────────────────────────── */}
         {activeAdminTab === "notifications" && (
           <div className="space-y-6">
-            {/* Notification Statistics KPI Cards */}
-            <section className="grid grid-cols-2 lg:grid-cols-4 gap-3.5 sm:gap-4">
-              <div className="rounded-2xl border border-neutral-800 bg-neutral-900/60 p-4 shadow-sm">
-                <div className="flex items-center justify-between text-neutral-400 text-xs font-medium">
-                  <span>Total Notifications</span>
-                  <Bell className="size-4 text-amber-500" />
+            {/* Header & Controls */}
+            <div className="rounded-2xl border border-neutral-800 bg-neutral-900/60 p-5 sm:p-6 shadow-xl flex flex-col md:flex-row md:items-center justify-between gap-4">
+              <div>
+                <div className="flex items-center gap-2.5">
+                  <div className="size-9 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-500">
+                    <Bell className="size-5" />
+                  </div>
+                  <div>
+                    <h2 className="text-xl font-display font-bold text-neutral-50">Admin Notifications</h2>
+                    <p className="text-xs text-neutral-400 mt-0.5">
+                      Live alerts for customer table bookings, pre-orders, and reservation cancellations.
+                    </p>
+                  </div>
                 </div>
-                <p className="mt-2 text-2xl sm:text-3xl font-display font-bold text-white">
-                  {logMetrics.total}
-                </p>
-                <p className="mt-1 text-[11px] text-neutral-500">Across SMS, Email, & WhatsApp</p>
               </div>
 
-              <div className="rounded-2xl border border-emerald-900/40 bg-emerald-950/20 p-4 shadow-sm">
-                <div className="flex items-center justify-between text-emerald-400 text-xs font-medium">
-                  <span>Delivered / Sent</span>
-                  <CheckCircle2 className="size-4 text-emerald-400" />
-                </div>
-                <p className="mt-2 text-2xl sm:text-3xl font-display font-bold text-emerald-300">
-                  {logMetrics.sent}
-                </p>
-                <p className="mt-1 text-[11px] text-emerald-500/70">Dispatched to guests</p>
-              </div>
-
-              <div className="rounded-2xl border border-rose-900/40 bg-rose-950/20 p-4 shadow-sm">
-                <div className="flex items-center justify-between text-rose-400 text-xs font-medium">
-                  <span>Failed / Retrying</span>
-                  <AlertTriangle className="size-4 text-rose-400" />
-                </div>
-                <p className="mt-2 text-2xl sm:text-3xl font-display font-bold text-rose-300">
-                  {logMetrics.failed + logMetrics.retrying}
-                </p>
-                <p className="mt-1 text-[11px] text-rose-500/70">
-                  {logMetrics.retrying > 0 ? `${logMetrics.retrying} in retry queue` : "Delivery issues"}
-                </p>
-              </div>
-
-              <div className="rounded-2xl border border-blue-900/40 bg-blue-950/20 p-4 shadow-sm">
-                <div className="flex items-center justify-between text-blue-400 text-xs font-medium">
-                  <span>Success Rate</span>
-                  <Send className="size-4 text-blue-400" />
-                </div>
-                <p className="mt-2 text-2xl sm:text-3xl font-display font-bold text-blue-300">
-                  {logMetrics.rate}%
-                </p>
-                <p className="mt-1 text-[11px] text-blue-500/70">Multi-provider delivery rate</p>
-              </div>
-            </section>
-
-            {/* Filter & Search Bar */}
-            <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-4 flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3">
-              <div className="relative flex-1 max-w-md">
-                <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 size-4 text-neutral-500" />
-                <Input
-                  type="text"
-                  value={logsSearch}
-                  onChange={(e) => setLogsSearch(e.target.value)}
-                  placeholder="Search by recipient, booking code, or event..."
-                  className="bg-neutral-950 border-neutral-800 text-neutral-100 placeholder:text-neutral-500 pl-10 h-10 text-xs rounded-xl focus:border-amber-500"
-                />
-              </div>
-
-              <div className="flex items-center gap-2 overflow-x-auto pb-1 md:pb-0">
+              <div className="flex flex-wrap items-center gap-2">
+                {/* Filter toggle: All vs Unread */}
                 <div className="flex items-center bg-neutral-950 border border-neutral-800 rounded-xl p-1 text-xs">
-                  {[
-                    { id: "all", label: "All Channels" },
-                    { id: "whatsapp", label: "WhatsApp" },
-                    { id: "sms", label: "SMS" },
-                    { id: "email", label: "Email" },
-                  ].map((ch) => (
-                    <button
-                      key={ch.id}
-                      onClick={() => setLogsChannelFilter(ch.id)}
-                      className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
-                        logsChannelFilter === ch.id
-                          ? "bg-amber-600 text-neutral-950 font-semibold"
-                          : "text-neutral-400 hover:text-white"
-                      }`}
-                    >
-                      {ch.label}
-                    </button>
-                  ))}
+                  <button
+                    type="button"
+                    onClick={() => setNotifFilter("all")}
+                    className={`px-3 py-1.5 rounded-lg font-medium transition-all ${
+                      notifFilter === "all"
+                        ? "bg-amber-600 text-neutral-950 font-bold"
+                        : "text-neutral-400 hover:text-white"
+                    }`}
+                  >
+                    All ({notifications.length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setNotifFilter("unread")}
+                    className={`px-3 py-1.5 rounded-lg font-medium transition-all ${
+                      notifFilter === "unread"
+                        ? "bg-amber-600 text-neutral-950 font-bold"
+                        : "text-neutral-400 hover:text-white"
+                    }`}
+                  >
+                    Unread ({unreadNotifCount})
+                  </button>
                 </div>
+
+                {unreadNotifCount > 0 && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={handleMarkAllRead}
+                    className="bg-neutral-900 border-neutral-700 text-neutral-200 hover:text-white text-xs h-9"
+                  >
+                    <CheckCheck className="size-3.5 mr-1.5 text-emerald-400" /> Mark All as Read
+                  </Button>
+                )}
+
+                {notifications.length > 0 && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={handleClearAllNotifications}
+                    className="bg-neutral-900 border-neutral-800 text-neutral-400 hover:text-rose-400 hover:bg-rose-950/20 text-xs h-9"
+                  >
+                    <Trash2 className="size-3.5 mr-1.5" /> Clear All
+                  </Button>
+                )}
 
                 <Button
-                  variant="outline"
                   size="sm"
-                  onClick={refreshLogs}
-                  disabled={loadingLogs}
-                  className="bg-neutral-900 border-neutral-800 text-neutral-300 text-xs hover:text-white shrink-0"
+                  variant="outline"
+                  onClick={loadNotificationsData}
+                  disabled={loadingNotifications}
+                  className="bg-neutral-900 border-neutral-800 text-neutral-300 hover:text-white text-xs h-9"
                 >
-                  <RefreshCw className={`size-3.5 mr-1 ${loadingLogs ? "animate-spin" : ""}`} /> Refresh
+                  <RefreshCw className={`size-3.5 mr-1.5 ${loadingNotifications ? "animate-spin" : ""}`} /> Refresh
                 </Button>
               </div>
-            </section>
+            </div>
 
-            {/* Logs Table */}
-            <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 overflow-hidden shadow-xl">
-              <div className="overflow-x-auto">
-                <table className="w-full text-left border-collapse text-xs">
-                  <thead>
-                    <tr className="border-b border-neutral-800 bg-neutral-950/60 text-neutral-400 font-semibold">
-                      <th className="py-3 px-4">Time</th>
-                      <th className="py-3 px-4">Channel</th>
-                      <th className="py-3 px-4">Event</th>
-                      <th className="py-3 px-4">Recipient</th>
-                      <th className="py-3 px-4">Subject / Message</th>
-                      <th className="py-3 px-4">Status</th>
-                      <th className="py-3 px-4">Provider</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-neutral-800/60 font-medium">
-                    {filteredLogs.length === 0 ? (
-                      <tr>
-                        <td colSpan={7} className="py-12 text-center text-neutral-500">
-                          <Bell className="size-8 mx-auto mb-2 text-neutral-600" />
-                          <p className="text-sm font-medium">No notification delivery logs found</p>
-                          <p className="text-xs text-neutral-600 mt-1">
-                            Notifications triggered by reservations and orders will appear here in real-time.
-                          </p>
-                        </td>
-                      </tr>
-                    ) : (
-                      filteredLogs.map((log) => {
-                        const dateFormatted = log.created_at
-                          ? new Date(log.created_at).toLocaleTimeString([], {
-                              hour: "2-digit",
-                              minute: "2-digit",
-                              second: "2-digit",
-                            }) +
-                            " · " +
-                            new Date(log.created_at).toLocaleDateString([], {
-                              month: "short",
-                              day: "numeric",
-                            })
-                          : "Just now";
+            {/* Notifications Feed */}
+            <div className="space-y-3">
+              {(() => {
+                const filtered = notifications.filter((n) => (notifFilter === "unread" ? !n.read : true));
+                if (filtered.length === 0) {
+                  return (
+                    <div className="rounded-2xl border border-neutral-800 bg-neutral-900/40 p-12 text-center text-neutral-500 shadow-xl">
+                      <Bell className="size-10 mx-auto mb-3 text-neutral-600" />
+                      <p className="text-base font-semibold text-neutral-300">No notifications found</p>
+                      <p className="text-xs text-neutral-500 mt-1 max-w-sm mx-auto">
+                        {notifFilter === "unread"
+                          ? "You have caught up with all notifications. Click 'All' to view history."
+                          : "New customer reservations and booking updates will appear here automatically in real time."}
+                      </p>
+                    </div>
+                  );
+                }
 
-                        return (
-                          <tr key={log.id} className="hover:bg-neutral-800/30 transition-colors">
-                            <td className="py-3.5 px-4 font-mono text-[11px] text-neutral-400 whitespace-nowrap">
-                              {dateFormatted}
-                            </td>
-                            <td className="py-3.5 px-4">
-                              {log.channel === "whatsapp" && (
-                                <Badge className="bg-emerald-950/80 text-emerald-300 border border-emerald-600/50 gap-1 text-[10px]">
-                                  <MessageSquare className="size-3" /> WhatsApp
-                                </Badge>
-                              )}
-                              {log.channel === "sms" && (
-                                <Badge className="bg-amber-950/80 text-amber-300 border border-amber-600/50 gap-1 text-[10px]">
-                                  <Phone className="size-3" /> SMS
-                                </Badge>
-                              )}
-                              {log.channel === "email" && (
-                                <Badge className="bg-blue-950/80 text-blue-300 border border-blue-600/50 gap-1 text-[10px]">
-                                  <Mail className="size-3" /> Email
-                                </Badge>
-                              )}
-                            </td>
-                            <td className="py-3.5 px-4 font-mono text-[11px] text-neutral-300">
-                              <span className="capitalize">{log.event.replace(/_/g, " ")}</span>
-                              {log.booking_code && (
-                                <span className="block text-[10px] text-amber-500 font-mono">
-                                  #{log.booking_code}
-                                </span>
-                              )}
-                            </td>
-                            <td className="py-3.5 px-4 font-mono text-[11px] text-neutral-200">
-                              {log.recipient}
-                            </td>
-                            <td className="py-3.5 px-4 text-neutral-300 max-w-xs truncate">
-                              <span className="font-semibold text-neutral-200">{log.subject || "Alert"}</span>
-                              {log.message && (
-                                <span className="block text-[11px] text-neutral-400 truncate">
-                                  {log.message}
-                                </span>
-                              )}
-                            </td>
-                            <td className="py-3.5 px-4 whitespace-nowrap">
-                              {log.status === "sent" || log.status === "delivered" ? (
-                                <Badge className="bg-emerald-950/80 text-emerald-300 border border-emerald-600/50 text-[10px] gap-1">
-                                  <CheckCircle2 className="size-3" /> {log.status}
-                                </Badge>
-                              ) : log.status === "retrying" ? (
-                                <Badge className="bg-amber-950/80 text-amber-300 border border-amber-600/50 text-[10px] gap-1">
-                                  <Clock className="size-3" /> Retry #{log.retry_count || 1}
-                                </Badge>
-                              ) : (
-                                <Badge className="bg-rose-950/80 text-rose-300 border border-rose-600/50 text-[10px] gap-1">
-                                  <XCircle className="size-3" /> Failed
-                                </Badge>
-                              )}
-                              {log.error_message && (
-                                <span className="block text-[10px] text-rose-400 mt-0.5 truncate max-w-[150px]">
-                                  {log.error_message}
-                                </span>
-                              )}
-                            </td>
-                            <td className="py-3.5 px-4 font-mono text-[10px] text-neutral-500 uppercase">
-                              {log.provider || "simulator"}
+                return filtered.map((n) => {
+                  const dateFormatted = new Date(n.createdAt).toLocaleDateString([], {
+                    month: "short",
+                    day: "numeric",
+                    year: "numeric",
+                  });
+                  const timeFormatted = new Date(n.createdAt).toLocaleTimeString([], {
+                    hour: "2-digit",
+                    minute: "2-digit",
+                  });
+
+                  return (
+                    <div
+                      key={n.id}
+                      className={`rounded-2xl border p-4 sm:p-5 transition-all shadow-md flex items-start justify-between gap-4 ${
+                        !n.read
+                          ? "border-amber-500/40 bg-amber-950/15 ring-1 ring-amber-500/20"
+                          : "border-neutral-800 bg-neutral-900/60"
+                      }`}
+                    >
+                      <div className="flex items-start gap-3.5">
+                        <div
+                          className={`size-10 rounded-xl flex items-center justify-center shrink-0 mt-0.5 ${
+                            n.type === "reservation"
+                              ? "bg-emerald-500/15 text-emerald-400 border border-emerald-500/30"
+                              : n.type === "cancellation"
+                              ? "bg-rose-500/15 text-rose-400 border border-rose-500/30"
+                              : n.type === "payment"
+                              ? "bg-blue-500/15 text-blue-400 border border-blue-500/30"
+                              : "bg-amber-500/15 text-amber-400 border border-amber-500/30"
+                          }`}
+                        >
+                          {n.type === "reservation" && <CalendarCheck className="size-5" />}
+                          {n.type === "cancellation" && <AlertTriangle className="size-5" />}
+                          {n.type === "payment" && <DollarSign className="size-5" />}
+                          {n.type !== "reservation" && n.type !== "cancellation" && n.type !== "payment" && (
+                            <Bell className="size-5" />
+                          )}
+                        </div>
+
+                        <div>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="font-semibold text-sm text-neutral-100">{n.title}</span>
+                            {!n.read && (
+                              <Badge className="bg-amber-500 text-neutral-950 font-bold text-[10px] px-1.5 py-0.2">
+                                NEW
+                              </Badge>
+                            )}
+                            {n.bookingCode && (
+                              <Badge variant="outline" className="text-[10px] border-amber-500/30 text-amber-400 font-mono">
+                                #{n.bookingCode}
+                              </Badge>
+                            )}
+                            <span className="text-[11px] text-neutral-500 font-mono">
+                              {dateFormatted} at {timeFormatted}
+                            </span>
+                          </div>
+
+                          <p className="mt-1.5 text-xs text-neutral-300 leading-relaxed max-w-2xl">{n.message}</p>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2 shrink-0">
+                        {!n.read && (
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => handleMarkOneRead(n.id)}
+                            className="text-xs text-amber-400 hover:text-amber-300 hover:bg-amber-950/40 h-8 px-2.5"
+                          >
+                            <Check className="size-3.5 mr-1" /> Mark read
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                });
+              })()}
+            </div>
+          </div>
+        )}
+
+        {/* ── Tab 4: System Activity & Audit Logs ────────────────────────────── */}
+        {activeAdminTab === "logs" && (
+          <div className="space-y-6">
+            {/* Header & View Mode Selector */}
+            <div className="rounded-2xl border border-neutral-800 bg-neutral-900/60 p-5 sm:p-6 shadow-xl flex flex-col md:flex-row md:items-center justify-between gap-4">
+              <div>
+                <div className="flex items-center gap-2.5">
+                  <div className="size-9 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-500">
+                    <Activity className="size-5" />
+                  </div>
+                  <div>
+                    <h2 className="text-xl font-display font-bold text-neutral-50">System Activity & Audit Logs</h2>
+                    <p className="text-xs text-neutral-400 mt-0.5">
+                      Full audit trail of administrator logins, table bookings, cancellations, and menu adjustments.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                {/* View Mode Toggle: Activity Logs vs Delivery Logs */}
+                <div className="flex items-center bg-neutral-950 border border-neutral-800 rounded-xl p-1 text-xs">
+                  <button
+                    type="button"
+                    onClick={() => setLogsViewMode("activity")}
+                    className={`px-3 py-1.5 rounded-lg font-medium transition-all ${
+                      logsViewMode === "activity"
+                        ? "bg-amber-600 text-neutral-950 font-bold"
+                        : "text-neutral-400 hover:text-white"
+                    }`}
+                  >
+                    Activity Logs ({auditLogs.length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setLogsViewMode("delivery")}
+                    className={`px-3 py-1.5 rounded-lg font-medium transition-all ${
+                      logsViewMode === "delivery"
+                        ? "bg-amber-600 text-neutral-950 font-bold"
+                        : "text-neutral-400 hover:text-white"
+                    }`}
+                  >
+                    SMS/Delivery Telemetry ({deliveryLogs.length})
+                  </button>
+                </div>
+
+                {logsViewMode === "activity" && auditLogs.length > 0 && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={handleClearAuditLogs}
+                    className="bg-neutral-900 border-neutral-800 text-neutral-400 hover:text-rose-400 hover:bg-rose-950/20 text-xs h-9"
+                  >
+                    <Trash2 className="size-3.5 mr-1.5" /> Clear Logs
+                  </Button>
+                )}
+
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={logsViewMode === "activity" ? loadAuditLogsData : refreshLogs}
+                  disabled={loadingAuditLogs || loadingLogs}
+                  className="bg-neutral-900 border-neutral-800 text-neutral-300 hover:text-white text-xs h-9"
+                >
+                  <RefreshCw
+                    className={`size-3.5 mr-1.5 ${loadingAuditLogs || loadingLogs ? "animate-spin" : ""}`}
+                  />{" "}
+                  Refresh
+                </Button>
+              </div>
+            </div>
+
+            {/* View Mode 1: Activity Audit Logs */}
+            {logsViewMode === "activity" && (
+              <div className="space-y-4">
+                {/* Search & Filter Toolbar */}
+                <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-4 flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-3">
+                  <div className="relative flex-1 max-w-md">
+                    <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 size-4 text-neutral-500" />
+                    <Input
+                      type="text"
+                      value={auditSearch}
+                      onChange={(e) => setAuditSearch(e.target.value)}
+                      placeholder="Search by user, action, details..."
+                      className="bg-neutral-950 border-neutral-800 text-neutral-100 placeholder:text-neutral-500 pl-10 h-10 text-xs rounded-xl focus:border-amber-500"
+                    />
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    {/* Filter by Date */}
+                    <div className="flex items-center gap-1.5">
+                      <Label htmlFor="auditDate" className="text-xs text-neutral-400 shrink-0">
+                        Date:
+                      </Label>
+                      <Input
+                        id="auditDate"
+                        type="date"
+                        value={auditDateFilter}
+                        onChange={(e) => setAuditDateFilter(e.target.value)}
+                        className="bg-neutral-950 border-neutral-800 text-neutral-200 text-xs h-10 w-40 rounded-xl"
+                      />
+                      {auditDateFilter && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => setAuditDateFilter("")}
+                          className="h-9 px-2 text-xs text-neutral-400 hover:text-white"
+                        >
+                          Clear
+                        </Button>
+                      )}
+                    </div>
+
+                    {/* Category Filter Pills */}
+                    <div className="flex items-center bg-neutral-950 border border-neutral-800 rounded-xl p-1 text-xs">
+                      {[
+                        { id: "all", label: "All" },
+                        { id: "reservation", label: "Reservations" },
+                        { id: "menu", label: "Menu" },
+                        { id: "auth", label: "Auth" },
+                        { id: "system", label: "System" },
+                      ].map((cat) => (
+                        <button
+                          key={cat.id}
+                          onClick={() => setAuditCategoryFilter(cat.id)}
+                          className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                            auditCategoryFilter === cat.id
+                              ? "bg-amber-600 text-neutral-950 font-semibold"
+                              : "text-neutral-400 hover:text-white"
+                          }`}
+                        >
+                          {cat.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </section>
+
+                {/* Audit Logs Table */}
+                <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 overflow-hidden shadow-xl">
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left border-collapse text-xs">
+                      <thead>
+                        <tr className="border-b border-neutral-800 bg-neutral-950/60 text-neutral-400 font-semibold">
+                          <th className="py-3 px-4">Timestamp</th>
+                          <th className="py-3 px-4">User</th>
+                          <th className="py-3 px-4">Action</th>
+                          <th className="py-3 px-4">Category</th>
+                          <th className="py-3 px-4">Details</th>
+                          <th className="py-3 px-4">Status</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-neutral-800/60 font-medium">
+                        {auditLogs.length === 0 ? (
+                          <tr>
+                            <td colSpan={6} className="py-12 text-center text-neutral-500">
+                              <Activity className="size-8 mx-auto mb-2 text-neutral-600" />
+                              <p className="text-sm font-medium">No activity logs recorded yet</p>
+                              <p className="text-xs text-neutral-600 mt-1">
+                                System actions like logins, table reservations, and menu changes will appear here.
+                              </p>
                             </td>
                           </tr>
-                        );
-                      })
-                    )}
-                  </tbody>
-                </table>
+                        ) : (
+                          auditLogs.map((log) => {
+                            const dateFormatted = log.timestamp
+                              ? new Date(log.timestamp).toLocaleTimeString([], {
+                                  hour: "2-digit",
+                                  minute: "2-digit",
+                                  second: "2-digit",
+                                }) +
+                                " · " +
+                                new Date(log.timestamp).toLocaleDateString([], {
+                                  month: "short",
+                                  day: "numeric",
+                                  year: "numeric",
+                                })
+                              : "Just now";
+
+                            return (
+                              <tr key={log.id} className="hover:bg-neutral-800/30 transition-colors">
+                                <td className="py-3.5 px-4 font-mono text-[11px] text-neutral-400 whitespace-nowrap">
+                                  {dateFormatted}
+                                </td>
+                                <td className="py-3.5 px-4 font-semibold text-neutral-200 whitespace-nowrap">
+                                  {log.user}
+                                </td>
+                                <td className="py-3.5 px-4 font-mono text-[11px]">
+                                  <Badge
+                                    variant="outline"
+                                    className="border-neutral-700 bg-neutral-800/60 text-amber-400 font-mono text-[10px]"
+                                  >
+                                    {log.action}
+                                  </Badge>
+                                </td>
+                                <td className="py-3.5 px-4">
+                                  <span className="capitalize text-[11px] text-neutral-400 font-medium">
+                                    {log.category}
+                                  </span>
+                                </td>
+                                <td className="py-3.5 px-4 text-neutral-300 leading-relaxed max-w-md">
+                                  {log.details}
+                                </td>
+                                <td className="py-3.5 px-4 whitespace-nowrap">
+                                  {log.status === "success" && (
+                                    <Badge className="bg-emerald-950/80 text-emerald-300 border border-emerald-600/50 text-[10px] gap-1">
+                                      <CheckCircle2 className="size-3" /> Success
+                                    </Badge>
+                                  )}
+                                  {log.status === "warning" && (
+                                    <Badge className="bg-amber-950/80 text-amber-300 border border-amber-600/50 text-[10px] gap-1">
+                                      <AlertTriangle className="size-3" /> Warning
+                                    </Badge>
+                                  )}
+                                  {log.status === "error" && (
+                                    <Badge className="bg-rose-950/80 text-rose-300 border border-rose-600/50 text-[10px] gap-1">
+                                      <XCircle className="size-3" /> Error
+                                    </Badge>
+                                  )}
+                                </td>
+                              </tr>
+                            );
+                          })
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
               </div>
-            </section>
+            )}
+
+            {/* View Mode 2: SMS & Messaging Delivery Telemetry Logs */}
+            {logsViewMode === "delivery" && (
+              <div className="space-y-4">
+                {/* Notification Statistics KPI Cards */}
+                <section className="grid grid-cols-2 lg:grid-cols-4 gap-3.5 sm:gap-4">
+                  <div className="rounded-2xl border border-neutral-800 bg-neutral-900/60 p-4 shadow-sm">
+                    <div className="flex items-center justify-between text-neutral-400 text-xs font-medium">
+                      <span>Total Notifications</span>
+                      <Bell className="size-4 text-amber-500" />
+                    </div>
+                    <p className="mt-2 text-2xl sm:text-3xl font-display font-bold text-white">
+                      {logMetrics.total}
+                    </p>
+                    <p className="mt-1 text-[11px] text-neutral-500">Across SMS, Email, & WhatsApp</p>
+                  </div>
+
+                  <div className="rounded-2xl border border-emerald-900/40 bg-emerald-950/20 p-4 shadow-sm">
+                    <div className="flex items-center justify-between text-emerald-400 text-xs font-medium">
+                      <span>Delivered / Sent</span>
+                      <CheckCircle2 className="size-4 text-emerald-400" />
+                    </div>
+                    <p className="mt-2 text-2xl sm:text-3xl font-display font-bold text-emerald-300">
+                      {logMetrics.sent}
+                    </p>
+                    <p className="mt-1 text-[11px] text-emerald-500/70">Dispatched to guests</p>
+                  </div>
+
+                  <div className="rounded-2xl border border-rose-900/40 bg-rose-950/20 p-4 shadow-sm">
+                    <div className="flex items-center justify-between text-rose-400 text-xs font-medium">
+                      <span>Failed / Retrying</span>
+                      <AlertTriangle className="size-4 text-rose-400" />
+                    </div>
+                    <p className="mt-2 text-2xl sm:text-3xl font-display font-bold text-rose-300">
+                      {logMetrics.failed + logMetrics.retrying}
+                    </p>
+                    <p className="mt-1 text-[11px] text-rose-500/70">
+                      {logMetrics.retrying > 0 ? `${logMetrics.retrying} in retry queue` : "Delivery issues"}
+                    </p>
+                  </div>
+
+                  <div className="rounded-2xl border border-blue-900/40 bg-blue-950/20 p-4 shadow-sm">
+                    <div className="flex items-center justify-between text-blue-400 text-xs font-medium">
+                      <span>Success Rate</span>
+                      <Send className="size-4 text-blue-400" />
+                    </div>
+                    <p className="mt-2 text-2xl sm:text-3xl font-display font-bold text-blue-300">
+                      {logMetrics.rate}%
+                    </p>
+                    <p className="mt-1 text-[11px] text-blue-500/70">Multi-provider delivery rate</p>
+                  </div>
+                </section>
+
+                {/* Filter & Search Bar */}
+                <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-4 flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3">
+                  <div className="relative flex-1 max-w-md">
+                    <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 size-4 text-neutral-500" />
+                    <Input
+                      type="text"
+                      value={logsSearch}
+                      onChange={(e) => setLogsSearch(e.target.value)}
+                      placeholder="Search by recipient, booking code, or event..."
+                      className="bg-neutral-950 border-neutral-800 text-neutral-100 placeholder:text-neutral-500 pl-10 h-10 text-xs rounded-xl focus:border-amber-500"
+                    />
+                  </div>
+
+                  <div className="flex items-center gap-2 overflow-x-auto pb-1 md:pb-0">
+                    <div className="flex items-center bg-neutral-950 border border-neutral-800 rounded-xl p-1 text-xs">
+                      {[
+                        { id: "all", label: "All Channels" },
+                        { id: "whatsapp", label: "WhatsApp" },
+                        { id: "sms", label: "SMS" },
+                        { id: "email", label: "Email" },
+                      ].map((ch) => (
+                        <button
+                          key={ch.id}
+                          onClick={() => setLogsChannelFilter(ch.id)}
+                          className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                            logsChannelFilter === ch.id
+                              ? "bg-amber-600 text-neutral-950 font-semibold"
+                              : "text-neutral-400 hover:text-white"
+                          }`}
+                        >
+                          {ch.label}
+                        </button>
+                      ))}
+                    </div>
+
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={refreshLogs}
+                      disabled={loadingLogs}
+                      className="bg-neutral-900 border-neutral-800 text-neutral-300 text-xs hover:text-white shrink-0"
+                    >
+                      <RefreshCw className={`size-3.5 mr-1 ${loadingLogs ? "animate-spin" : ""}`} /> Refresh
+                    </Button>
+                  </div>
+                </section>
+
+                {/* Logs Table */}
+                <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 overflow-hidden shadow-xl">
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left border-collapse text-xs">
+                      <thead>
+                        <tr className="border-b border-neutral-800 bg-neutral-950/60 text-neutral-400 font-semibold">
+                          <th className="py-3 px-4">Time</th>
+                          <th className="py-3 px-4">Channel</th>
+                          <th className="py-3 px-4">Event</th>
+                          <th className="py-3 px-4">Recipient</th>
+                          <th className="py-3 px-4">Preview</th>
+                          <th className="py-3 px-4">Status</th>
+                          <th className="py-3 px-4">Provider</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-neutral-800/60 font-medium">
+                        {filteredLogs.length === 0 ? (
+                          <tr>
+                            <td colSpan={7} className="py-12 text-center text-neutral-500">
+                              <Bell className="size-8 mx-auto mb-2 text-neutral-600" />
+                              <p className="text-sm font-medium">No notification delivery logs found</p>
+                              <p className="text-xs text-neutral-600 mt-1">
+                                Dispatched notifications across SMS, WhatsApp, and email will appear here.
+                              </p>
+                            </td>
+                          </tr>
+                        ) : (
+                          filteredLogs.map((log) => {
+                            const dateFormatted = log.createdAt
+                              ? new Date(log.createdAt).toLocaleTimeString([], {
+                                  hour: "2-digit",
+                                  minute: "2-digit",
+                                  second: "2-digit",
+                                }) +
+                                " · " +
+                                new Date(log.createdAt).toLocaleDateString([], {
+                                  month: "short",
+                                  day: "numeric",
+                                })
+                              : "Just now";
+
+                            return (
+                              <tr key={log.id} className="hover:bg-neutral-800/30 transition-colors">
+                                <td className="py-3.5 px-4 font-mono text-[11px] text-neutral-400 whitespace-nowrap">
+                                  {dateFormatted}
+                                </td>
+                                <td className="py-3.5 px-4">
+                                  {log.channel === "whatsapp" && (
+                                    <Badge className="bg-emerald-950/80 text-emerald-300 border border-emerald-600/50 gap-1 text-[10px]">
+                                      <MessageSquare className="size-3" /> WhatsApp
+                                    </Badge>
+                                  )}
+                                  {log.channel === "sms" && (
+                                    <Badge className="bg-amber-950/80 text-amber-300 border border-amber-600/50 gap-1 text-[10px]">
+                                      <Phone className="size-3" /> SMS
+                                    </Badge>
+                                  )}
+                                  {log.channel === "email" && (
+                                    <Badge className="bg-blue-950/80 text-blue-300 border border-blue-600/50 gap-1 text-[10px]">
+                                      <Mail className="size-3" /> Email
+                                    </Badge>
+                                  )}
+                                </td>
+                                <td className="py-3.5 px-4 font-mono text-[11px] text-neutral-300">
+                                  <span className="capitalize">{log.eventType?.replace(/_/g, " ") || "Alert"}</span>
+                                  {log.bookingCode && (
+                                    <span className="block text-[10px] text-amber-500 font-mono">
+                                      #{log.bookingCode}
+                                    </span>
+                                  )}
+                                </td>
+                                <td className="py-3.5 px-4 font-mono text-[11px] text-neutral-200">
+                                  {log.recipient}
+                                </td>
+                                <td className="py-3.5 px-4 text-neutral-300 max-w-xs truncate">
+                                  <span className="block text-[11px] text-neutral-300 truncate">
+                                    {log.messagePreview || "Dispatched notification"}
+                                  </span>
+                                </td>
+                                <td className="py-3.5 px-4 whitespace-nowrap">
+                                  {log.status === "sent" || log.status === "delivered" ? (
+                                    <Badge className="bg-emerald-950/80 text-emerald-300 border border-emerald-600/50 text-[10px] gap-1">
+                                      <CheckCircle2 className="size-3" /> {log.status}
+                                    </Badge>
+                                  ) : log.status === "retrying" ? (
+                                    <Badge className="bg-amber-950/80 text-amber-300 border border-amber-600/50 text-[10px] gap-1">
+                                      <Clock className="size-3" /> Retry #{log.attempts || 1}
+                                    </Badge>
+                                  ) : (
+                                    <Badge className="bg-rose-950/80 text-rose-300 border border-rose-600/50 text-[10px] gap-1">
+                                      <XCircle className="size-3" /> Failed
+                                    </Badge>
+                                  )}
+                                  {log.errorMessage && (
+                                    <span className="block text-[10px] text-rose-400 mt-0.5 truncate max-w-[150px]">
+                                      {log.errorMessage}
+                                    </span>
+                                  )}
+                                </td>
+                                <td className="py-3.5 px-4 font-mono text-[10px] text-neutral-500 uppercase">
+                                  {log.provider || "simulator"}
+                                </td>
+                              </tr>
+                            );
+                          })
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+              </div>
+            )}
           </div>
         )}
       </main>

@@ -3,6 +3,7 @@ import { useState, useEffect } from "react";
 import { ShieldCheck, Eye, EyeOff, Lock, UserCheck, ArrowLeft, AlertCircle } from "lucide-react";
 import { toast } from "sonner";
 import { loginAdmin, getCurrentAdmin, seedDefaultAdmin } from "@/lib/auth";
+import { logActivity } from "@/lib/audit-logs";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -51,9 +52,23 @@ function AdminLoginPage() {
     try {
       const res = await loginAdmin({ identifier, password });
       if (res.success && res.user) {
+        logActivity({
+          user: res.user.name || "Admin",
+          action: "ADMIN_LOGIN",
+          category: "auth",
+          details: `Admin user @${res.user.username} (${res.user.name}) logged into Admin Console`,
+          status: "success",
+        }).catch(() => {});
         toast.success(`Welcome to Management Console, ${res.user.name}`);
         navigate({ to: redirectTarget });
       } else {
+        logActivity({
+          user: identifier || "Unknown",
+          action: "FAILED_LOGIN_ATTEMPT",
+          category: "auth",
+          details: `Failed administrator login attempt for identifier: "${identifier}"`,
+          status: "warning",
+        }).catch(() => {});
         setErrorMessage(res.error || "Authentication failed. Invalid administrator credentials.");
         toast.error(res.error || "Admin login failed.");
       }
