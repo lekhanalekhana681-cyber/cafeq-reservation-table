@@ -25,6 +25,8 @@ import {
 } from "lucide-react";
 
 import tableReserved from "@/assets/table-reserved.jpg";
+import lekhanaImg from "@/assets/lekhana.jpg";
+import chandanaImg from "@/assets/chandana.jpg";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -73,16 +75,14 @@ const owners = [
     role: "Co-Founder",
     bio:
       "Lekhana grew up watching her grandmother brew filter coffee before sunrise — and never stopped chasing that ritual. After years in tech and a stint learning espresso in Coorg, she brought both worlds together to build CAFEQ: a place where the Wi-Fi is fast and the coffee is even faster. She curates the beans, oversees sourcing, and still personally signs off on every new menu item.",
-    placeholder: "LB",
-    accent: "from-[--espresso] to-[--clay]",
+    image: lekhanaImg,
   },
   {
-    name: "Chandana Kashyap",
+    name: "Chandana",
     role: "Co-Founder",
     bio:
       "Chandana is the architect behind CAFEQ's atmosphere. From the furniture choices to the playlist, she believes every detail shapes how a cup of coffee feels. A trained pastry chef who switched to hospitality design, she built the kitchen programme from scratch and made sure \"cozy\" and \"efficient\" were never mutually exclusive. She runs operations, the team culture, and yes — also makes the best croissants.",
-    placeholder: "CK",
-    accent: "from-[--clay] to-[--sage]",
+    image: chandanaImg,
   },
 ];
 
@@ -342,23 +342,21 @@ function VisitPage() {
           {owners.map((o) => (
             <div
               key={o.name}
-              className="rounded-2xl border border-border bg-card shadow-warm overflow-hidden"
+              className="rounded-2xl border border-border bg-card p-6 sm:p-8 shadow-warm flex flex-col items-center text-center"
             >
-              {/* Photo placeholder */}
-              <div
-                className={`flex h-48 items-center justify-center bg-gradient-to-br ${o.accent}`}
-              >
-                <div className="flex size-24 items-center justify-center rounded-full bg-white/20 text-white text-4xl font-bold">
-                  {o.placeholder}
-                </div>
+              <div className="mb-4">
+                <img
+                  src={o.image}
+                  alt={o.name}
+                  className="w-[120px] h-[120px] rounded-full object-cover border-2 border-border shadow-sm"
+                  style={{ width: "120px", height: "120px", borderRadius: "50%", objectFit: "cover" }}
+                />
               </div>
-              <div className="p-6">
-                <div className="flex items-baseline gap-2">
-                  <h3 className="text-xl font-semibold">{o.name}</h3>
-                  <span className="text-xs text-muted-foreground font-medium">{o.role}</span>
-                </div>
-                <p className="mt-3 text-sm text-muted-foreground leading-relaxed">{o.bio}</p>
+              <div className="flex flex-col items-center gap-1">
+                <h3 className="text-xl font-semibold">{o.name}</h3>
+                <span className="text-xs text-muted-foreground font-medium">{o.role}</span>
               </div>
+              <p className="mt-4 text-sm text-muted-foreground leading-relaxed">{o.bio}</p>
             </div>
           ))}
         </div>

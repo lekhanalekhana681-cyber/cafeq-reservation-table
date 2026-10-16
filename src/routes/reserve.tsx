@@ -757,7 +757,7 @@ function ReservePage() {
   return (
     <>
       <PageBackground imageUrl="https://images.unsplash.com/photo-1559525839-b184a4d698c7?q=80&w=2000&auto=format&fit=crop" />
-      <form onSubmit={submit} className="mx-auto max-w-6xl px-8 py-16 relative z-10 bg-background/80 backdrop-blur-md my-12 rounded-3xl border border-border/50">
+      <form onSubmit={submit} className="mx-auto max-w-6xl px-4 sm:px-8 py-10 sm:py-16 relative z-10 bg-background/80 backdrop-blur-md my-8 sm:my-12 rounded-3xl border border-border/50">
         <div className="flex flex-col sm:flex-row sm:items-baseline sm:justify-between gap-2 border-b border-border/70 pb-6">
         <div>
           <p className="eyebrow">Table & Food Booking</p>
@@ -821,8 +821,9 @@ function ReservePage() {
         )}
       </div>
 
-      <div className="mt-10 grid gap-12 lg:grid-cols-[minmax(0,1fr)_370px]">
-        <div className="space-y-12">
+      {/* TWO DISTINCT BLOCKS: Reservation Form Steps & Summary Card */}
+      <div className="mt-10 flex flex-col lg:flex-row items-start gap-8">
+        <div className="w-full flex-1 min-w-0 space-y-12">
           {/* STEP 1: Date, Time & Party */}
           <section>
             <div className="flex items-center gap-2">
@@ -1204,7 +1205,7 @@ function ReservePage() {
         </div>
 
         {/* SIDEBAR BOOKING SUMMARY */}
-        <aside className="lg:sticky lg:top-24 lg:self-start">
+        <aside className="w-full lg:w-[380px] lg:shrink-0">
           <div className="rounded-2xl border border-border bg-card p-6 shadow-warm">
             <h3 className="text-xl font-display text-foreground">Reservation Summary</h3>
             <p className="mt-1 text-xs text-muted-foreground">
