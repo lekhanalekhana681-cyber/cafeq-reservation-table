@@ -20,8 +20,8 @@ function getPublicClient() {
 
 export const DEFAULT_PREFERENCES: NotificationPreferences = {
   smsEnabled: true,
-  emailEnabled: true,
-  whatsappEnabled: true,
+  emailEnabled: false,
+  whatsappEnabled: false,
   remindersEnabled: true,
 };
 
