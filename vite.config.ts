@@ -19,4 +19,13 @@ export default defineConfig({
     port: 3000,
     host: true,
   },
+  build: {
+    rollupOptions: {
+      // nodemailer is a Node.js-only package (uses node:stream, node:crypto, etc.)
+      // It must never be bundled into the browser build.
+      // The email.provider.ts already guards with `typeof window === "undefined"`
+      // before dynamically importing it, so this is safe.
+      external: ["nodemailer"],
+    },
+  },
 });
