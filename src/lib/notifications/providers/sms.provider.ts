@@ -147,24 +147,42 @@ async function sendViaTwilio(payload: SmsSendPayload, config: ReturnType<typeof 
 // ─── Unified SMS Dispatcher ───────────────────────────────────────────────────
 
 export async function sendSmsNotification(payload: SmsSendPayload): Promise<ProviderSendResult> {
+  // In browser: route through Vercel serverless function (/api/send-sms) to avoid CORS
+  // and keep Twilio credentials safe server-side.
+  if (typeof window !== "undefined") {
+    try {
+      const res = await fetch("/api/send-sms", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ to: payload.to, message: payload.message }),
+      });
+      const data = await res.json();
+      return {
+        success: data.success ?? res.ok,
+        messageId: data.messageId,
+        provider: data.provider || "twilio_via_api",
+        error: data.error,
+      };
+    } catch (err: any) {
+      return { success: false, error: err?.message || "SMS API call failed", provider: "twilio_via_api" };
+    }
+  }
+
+  // Server-side (Node.js) — call Twilio or MSG91 directly
   const config = getSmsConfig();
 
   if (config.preferredProvider === "twilio") {
     const twilioRes = await sendViaTwilio(payload, config.twilio);
     if (twilioRes.success) return twilioRes;
-    // Fallback to msg91 if twilio failed
     if (config.msg91.authKey) return sendViaMsg91(payload, config.msg91);
     return twilioRes;
   }
 
-  // Default to MSG91
   const msg91Res = await sendViaMsg91(payload, config.msg91);
   if (msg91Res.success) return msg91Res;
-
-  // Fallback to Twilio if available
   if (config.twilio.sid && config.twilio.authToken) {
     return sendViaTwilio(payload, config.twilio);
   }
-
   return msg91Res;
 }
+
