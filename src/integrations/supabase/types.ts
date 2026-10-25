@@ -203,6 +203,53 @@ export interface Database {
           value?: string;
         };
       };
+      menu_items: {
+        Row: {
+          id: string;
+          name: string;
+          category: string;
+          price: number;
+          description: string | null;
+          is_veg: boolean;
+          is_alcoholic: boolean;
+          is_available: boolean;
+          tag: string | null;
+          image_url: string | null;
+          prep_time_minutes: number;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          name: string;
+          category: string;
+          price: number;
+          description?: string | null;
+          is_veg?: boolean;
+          is_alcoholic?: boolean;
+          is_available?: boolean;
+          tag?: string | null;
+          image_url?: string | null;
+          prep_time_minutes?: number;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          name?: string;
+          category?: string;
+          price?: number;
+          description?: string | null;
+          is_veg?: boolean;
+          is_alcoholic?: boolean;
+          is_available?: boolean;
+          tag?: string | null;
+          image_url?: string | null;
+          prep_time_minutes?: number;
+          created_at?: string;
+          updated_at?: string;
+        };
+      };
       receipts: {
         Row: {
           id: string;

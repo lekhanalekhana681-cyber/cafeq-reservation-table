@@ -31,7 +31,12 @@ import QRCode from "react-qr-code";
 import { categories as categoriesRaw, menu as menuRaw, tableTypes as tableTypesRaw, type MenuItem } from "@/data/menu";
 import { getOutOfStockItemIds } from "@/lib/stock";
 import { subscribeToKitchenEvents } from "@/lib/kitchen.sync";
-import { getStoredMenu, isCocktailsCategoryHidden, subscribeToMenuUpdates } from "@/lib/menu";
+import {
+  getStoredMenu,
+  syncMenuFromSupabase,
+  isCocktailsCategoryHidden,
+  subscribeToMenuUpdates,
+} from "@/lib/menu";
 
 const categories = categoriesRaw ?? [];
 const menu = menuRaw ?? [];
@@ -39,6 +44,7 @@ const tableTypes = tableTypesRaw ?? [];
 import {
   createBooking,
   evaluateSlotAndCustomer,
+  getPublicClient,
   getUserBookings,
   updateBookingPaymentStatus,
   verifyAndCompleteRazorpayPayment,
@@ -194,17 +200,74 @@ function ReservePage() {
       setMenuItems(getStoredMenu());
       setOutOfStockIds(getOutOfStockItemIds());
       setHideCocktails(isCocktailsCategoryHidden());
+
+      // Background sync from Supabase if connected
+      syncMenuFromSupabase()
+        .then((latest) => {
+          if (latest && latest.length > 0) {
+            setMenuItems(latest);
+            setOutOfStockIds(getOutOfStockItemIds());
+          }
+        })
+        .catch(() => {});
     };
+
+    // Initial load
     refresh();
+
+    // 1. Cross-tab sync via BroadcastChannel and storage events
     const unsubMenu = subscribeToMenuUpdates(refresh);
+
+    // 2. Kitchen sync events (STOCK_CHANGED)
     const unsubKitchen = subscribeToKitchenEvents((event) => {
       if (event.type === "STOCK_CHANGED") {
         setOutOfStockIds(getOutOfStockItemIds());
+        setMenuItems(getStoredMenu());
       }
     });
+
+    // 3. Refetch immediately on window focus and visibility change
+    const handleFocus = () => refresh();
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible") {
+        refresh();
+      }
+    };
+    window.addEventListener("focus", handleFocus);
+    document.addEventListener("visibilitychange", handleVisibility);
+
+    // 4. Short polling (every 10 seconds)
+    const pollInterval = setInterval(refresh, 10000);
+
+    // 5. Supabase Realtime subscription (when Supabase is configured)
+    const supabase = getPublicClient();
+    let realtimeChannel: any = null;
+    if (supabase) {
+      try {
+        realtimeChannel = supabase
+          .channel("public-menu-stock-realtime")
+          .on(
+            "postgres_changes",
+            { event: "*", schema: "public", table: "menu_items" },
+            () => {
+              refresh();
+            }
+          )
+          .subscribe();
+      } catch (err) {
+        console.warn("Could not establish Supabase realtime channel:", err);
+      }
+    }
+
     return () => {
       unsubMenu();
       unsubKitchen();
+      window.removeEventListener("focus", handleFocus);
+      document.removeEventListener("visibilitychange", handleVisibility);
+      clearInterval(pollInterval);
+      if (realtimeChannel && supabase) {
+        supabase.removeChannel(realtimeChannel);
+      }
     };
   }, []);
 
@@ -328,6 +391,12 @@ function ReservePage() {
 
   const preOrderedItems = useMemo(() => items.filter((i) => i.fulfillment === "pre_ordered"), [items]);
   const atTableItems = useMemo(() => items.filter((i) => i.fulfillment === "at_table"), [items]);
+  const outOfStockInCart = useMemo(() => {
+    return items.filter((it) => {
+      const menuItem = menuItems.find((m) => m.id === it.id);
+      return menuItem?.isAvailable === false || outOfStockIds.includes(it.id);
+    });
+  }, [items, menuItems, outOfStockIds]);
 
   const foodTotal = items.reduce((sum, i) => sum + i.price * i.qty, 0);
   const totalWithDeposit = foodTotal + (slotEvaluation.depositRequired ? slotEvaluation.depositAmount : 0);
@@ -361,7 +430,15 @@ function ReservePage() {
 
   const changeQty = (id: string, delta: number) => {
     const item = menuItems.find((m) => m.id === id);
-    if (delta > 0 && item?.isAlcoholic && (!cart[id] || cart[id].qty === 0) && !ageConfirmed) {
+    if (!item) return;
+
+    const isOutOfStock = item.isAvailable === false || outOfStockIds.includes(item.id);
+    if (delta > 0 && isOutOfStock) {
+      toast.error(`"${item.name}" is currently out of stock and cannot be added.`);
+      return;
+    }
+
+    if (delta > 0 && item.isAlcoholic && (!cart[id] || cart[id].qty === 0) && !ageConfirmed) {
       setAgeConfirmItem(item);
       return;
     }
@@ -378,6 +455,13 @@ function ReservePage() {
 
   const handleConfirmAgeAndAdd = () => {
     if (ageConfirmItem) {
+      const isOutOfStock = ageConfirmItem.isAvailable === false || outOfStockIds.includes(ageConfirmItem.id);
+      if (isOutOfStock) {
+        toast.error(`"${ageConfirmItem.name}" is currently out of stock.`);
+        setAgeConfirmItem(null);
+        return;
+      }
+
       setAgeConfirmed(true);
       const id = ageConfirmItem.id;
       setCart((prev) => {
@@ -407,6 +491,17 @@ function ReservePage() {
     e.preventDefault();
     if (!name.trim() || !phone.trim()) {
       toast.error("Add your name and phone number so we can hold your table.");
+      return;
+    }
+
+    // Client-side guard: verify no out-of-stock items in pre-order
+    const outOfStockInCart = items.filter((it) => {
+      const menuItem = menuItems.find((m) => m.id === it.id);
+      return menuItem?.isAvailable === false || outOfStockIds.includes(it.id);
+    });
+    if (outOfStockInCart.length > 0) {
+      const names = outOfStockInCart.map((i) => i.name).join(", ");
+      toast.error(`Cannot reserve: "${names}" is out of stock. Please remove it from your pre-order.`);
       return;
     }
 
@@ -1028,45 +1123,86 @@ function ReservePage() {
 
                 <div className="grid gap-3">
                   {menuItems
-                    .filter((m) => m.category === activeCategoryTab && !outOfStockIds.includes(m.id))
+                    .filter((m) => m.category === activeCategoryTab)
                     .map((item) => {
                       const itemCartState = cart[item.id];
                       const qty = itemCartState?.qty || 0;
                       const isPreorder = itemCartState?.fulfillment === "pre_ordered";
+                      const isOutOfStock =
+                        item.isAvailable === false || outOfStockIds.includes(item.id);
 
                       return (
                         <div
                           key={item.id}
-                          className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 rounded-xl border border-border/70 bg-card p-3.5 shadow-xs hover:border-accent/40 transition-colors"
+                          className={`flex flex-col sm:flex-row sm:items-center justify-between gap-4 rounded-xl border p-3.5 shadow-xs transition-colors ${
+                            isOutOfStock
+                              ? "border-border/40 bg-muted/30 opacity-60 grayscale-[40%]"
+                              : "border-border/70 bg-card hover:border-accent/40"
+                          }`}
                         >
                           <div className="flex items-center gap-3 min-w-0">
-                            <img
-                              src={item.image || "/uploads/menu/placeholder.webp"}
-                              alt={item.name}
-                              loading="lazy"
-                              onError={(e) => {
-                                e.currentTarget.src = "/uploads/menu/placeholder.webp";
-                              }}
-                              className="size-16 rounded-xl object-cover shrink-0 border border-border/60"
-                            />
+                            <div className="relative shrink-0">
+                              <img
+                                src={item.image || "/uploads/menu/placeholder.webp"}
+                                alt={item.name}
+                                loading="lazy"
+                                onError={(e) => {
+                                  e.currentTarget.src = "/uploads/menu/placeholder.webp";
+                                }}
+                                className={`size-16 rounded-xl object-cover border border-border/60 ${
+                                  isOutOfStock ? "filter grayscale brightness-75" : ""
+                                }`}
+                              />
+                              {isOutOfStock && (
+                                <div className="absolute inset-0 bg-background/70 backdrop-blur-[1px] rounded-xl flex items-center justify-center p-1 text-center">
+                                  <span className="text-[9px] font-bold uppercase tracking-wider text-muted-foreground px-1 py-0.5 rounded bg-background/90 shadow-xs">
+                                    Sold Out
+                                  </span>
+                                </div>
+                              )}
+                            </div>
                             <div className="min-w-0">
                               <div className="flex items-center gap-2 flex-wrap">
                                 <span
                                   className={`size-2.5 rounded-full border inline-block shrink-0 ${
-                                    item.isVeg ? "bg-emerald-500 border-emerald-600" : "bg-rose-500 border-rose-600"
+                                    item.isVeg
+                                      ? "bg-emerald-500 border-emerald-600"
+                                      : "bg-rose-500 border-rose-600"
                                   }`}
                                   title={item.isVeg ? "Vegetarian" : "Non-Vegetarian"}
                                 />
-                                <h4 className="font-medium text-sm text-foreground truncate">{item.name}</h4>
-                                {item.isAlcoholic && (
-                                  <Badge className="bg-rose-600 text-white text-[9px] px-1 py-0 font-bold flex items-center gap-0.5">
-                                    <Wine className="size-2.5" /> 18+
+                                <h4
+                                  className={`font-medium text-sm truncate ${
+                                    isOutOfStock
+                                      ? "text-muted-foreground line-through"
+                                      : "text-foreground"
+                                  }`}
+                                >
+                                  {item.name}
+                                </h4>
+                                {isOutOfStock ? (
+                                  <Badge
+                                    variant="destructive"
+                                    className="bg-red-500/15 text-red-500 dark:text-red-400 border border-red-500/30 text-[10px] font-semibold px-1.5 py-0"
+                                  >
+                                    Out of Stock
                                   </Badge>
-                                )}
-                                {item.tag && (
-                                  <Badge variant="secondary" className="text-[10px] font-normal px-1.5 py-0">
-                                    {item.tag}
-                                  </Badge>
+                                ) : (
+                                  <>
+                                    {item.isAlcoholic && (
+                                      <Badge className="bg-rose-600 text-white text-[9px] px-1 py-0 font-bold flex items-center gap-0.5">
+                                        <Wine className="size-2.5" /> 18+
+                                      </Badge>
+                                    )}
+                                    {item.tag && (
+                                      <Badge
+                                        variant="secondary"
+                                        className="text-[10px] font-normal px-1.5 py-0"
+                                      >
+                                        {item.tag}
+                                      </Badge>
+                                    )}
+                                  </>
                                 )}
                               </div>
                               <p className="text-xs text-muted-foreground truncate">{item.description}</p>
@@ -1080,43 +1216,72 @@ function ReservePage() {
                           </div>
 
                           <div className="flex items-center justify-between sm:justify-end gap-3 pt-2 sm:pt-0 border-t sm:border-t-0 border-border/40">
-                            {qty > 0 && (
-                              <button
-                                type="button"
-                                onClick={() => toggleFulfillment(item.id)}
-                                className={`rounded-md px-2 py-1 text-[11px] font-medium transition-colors border cursor-pointer ${
-                                  isPreorder
-                                    ? "bg-accent/15 text-accent border-accent/30"
-                                    : "bg-secondary text-muted-foreground border-border"
-                                }`}
-                              >
-                                {isPreorder ? "🍽️ Ready on Arrival" : "⏳ Order at Table"}
-                              </button>
-                            )}
+                            {isOutOfStock ? (
+                              <div className="flex items-center gap-2">
+                                {qty > 0 && (
+                                  <Button
+                                    type="button"
+                                    size="icon"
+                                    variant="outline"
+                                    className="size-8 text-destructive border-destructive/30"
+                                    aria-label={`Remove out of stock ${item.name}`}
+                                    onClick={() => changeQty(item.id, -1)}
+                                    title="Remove from selection"
+                                  >
+                                    <Minus className="size-3.5" />
+                                  </Button>
+                                )}
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant="outline"
+                                  disabled
+                                  className="h-8 px-3 text-xs font-semibold bg-muted/60 text-muted-foreground border-border/60 cursor-not-allowed opacity-80"
+                                >
+                                  Out of Stock
+                                </Button>
+                              </div>
+                            ) : (
+                              <>
+                                {qty > 0 && (
+                                  <button
+                                    type="button"
+                                    onClick={() => toggleFulfillment(item.id)}
+                                    className={`rounded-md px-2 py-1 text-[11px] font-medium transition-colors border cursor-pointer ${
+                                      isPreorder
+                                        ? "bg-accent/15 text-accent border-accent/30"
+                                        : "bg-secondary text-muted-foreground border-border"
+                                    }`}
+                                  >
+                                    {isPreorder ? "🍽️ Ready on Arrival" : "⏳ Order at Table"}
+                                  </button>
+                                )}
 
-                            <div className="flex items-center gap-2">
-                              <Button
-                                type="button"
-                                size="icon"
-                                variant="outline"
-                                className="size-8"
-                                aria-label={`Remove one ${item.name}`}
-                                onClick={() => changeQty(item.id, -1)}
-                              >
-                                <Minus className="size-3.5" />
-                              </Button>
-                              <span className="w-5 text-center text-sm font-semibold">{qty}</span>
-                              <Button
-                                type="button"
-                                size="icon"
-                                variant="outline"
-                                className="size-8"
-                                aria-label={`Add one ${item.name}`}
-                                onClick={() => changeQty(item.id, 1)}
-                              >
-                                <Plus className="size-3.5" />
-                              </Button>
-                            </div>
+                                <div className="flex items-center gap-2">
+                                  <Button
+                                    type="button"
+                                    size="icon"
+                                    variant="outline"
+                                    className="size-8"
+                                    aria-label={`Remove one ${item.name}`}
+                                    onClick={() => changeQty(item.id, -1)}
+                                  >
+                                    <Minus className="size-3.5" />
+                                  </Button>
+                                  <span className="w-5 text-center text-sm font-semibold">{qty}</span>
+                                  <Button
+                                    type="button"
+                                    size="icon"
+                                    variant="outline"
+                                    className="size-8"
+                                    aria-label={`Add one ${item.name}`}
+                                    onClick={() => changeQty(item.id, 1)}
+                                  >
+                                    <Plus className="size-3.5" />
+                                  </Button>
+                                </div>
+                              </>
+                            )}
                           </div>
                         </div>
                       );
@@ -1380,8 +1545,30 @@ function ReservePage() {
               <span className="font-bold text-accent text-xl">₹{totalWithDeposit}</span>
             </div>
 
-            <Button type="submit" className="mt-6 w-full shadow-md" size="lg" disabled={submitting}>
-              {submitting ? "Confirming Table…" : "Confirm Table & Pre-Order"}
+            {outOfStockInCart.length > 0 && (
+              <div className="mt-4 rounded-xl border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive flex items-start gap-2">
+                <AlertCircle className="size-4 shrink-0 mt-0.5" />
+                <div>
+                  <p className="font-semibold">Items Out of Stock</p>
+                  <p className="text-[11px] mt-0.5 leading-relaxed">
+                    {outOfStockInCart.map((i) => `"${i.name}"`).join(", ")}{" "}
+                    {outOfStockInCart.length === 1 ? "is" : "are"} currently out of stock. Please remove from your pre-order to proceed.
+                  </p>
+                </div>
+              </div>
+            )}
+
+            <Button
+              type="submit"
+              className="mt-6 w-full shadow-md"
+              size="lg"
+              disabled={submitting || outOfStockInCart.length > 0}
+            >
+              {submitting
+                ? "Confirming Table…"
+                : outOfStockInCart.length > 0
+                ? "Remove Out of Stock Items to Confirm"
+                : "Confirm Table & Pre-Order"}
             </Button>
           </div>
         </aside>

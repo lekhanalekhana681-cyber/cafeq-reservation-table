@@ -84,6 +84,7 @@ import {
 import { tableTypes, type MenuItem } from "@/data/menu";
 import {
   getStoredMenu,
+  syncMenuFromSupabase,
   updateMenuItemPrice,
   updateMenuItem,
   isCocktailsCategoryHidden,
@@ -326,6 +327,12 @@ function AdminDashboardPage() {
       const items = getStoredMenu();
       setMenuItems(items);
       setHideCocktails(isCocktailsCategoryHidden());
+      // Background sync from Supabase if connected
+      syncMenuFromSupabase().then((latest) => {
+        if (latest && latest.length > 0) {
+          setMenuItems(latest);
+        }
+      }).catch(() => {});
     } catch (err) {
       console.error("Failed to load menu in admin:", err);
     }
@@ -631,7 +638,11 @@ function AdminDashboardPage() {
 
   const handleToggleItemAvailability = (item: MenuItem) => {
     const nextAvailability = !item.isAvailable;
-    updateMenuItem(item.id, { isAvailable: nextAvailability });
+    const ok = updateMenuItem(item.id, { isAvailable: nextAvailability });
+    if (!ok) {
+      toast.error(`Could not update stock for "${item.name}".`);
+      return;
+    }
     logActivity({
       user: admin?.name || "Admin",
       action: "MENU_AVAILABILITY_CHANGED",

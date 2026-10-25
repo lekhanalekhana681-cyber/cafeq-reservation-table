@@ -63,10 +63,13 @@ const bookingSchema = z.object({
   completedAt: z.string().optional(),
 });
 
+import { getOutOfStockItemIds } from "@/lib/stock";
+import { getStoredMenu } from "@/lib/menu";
+
 export type BookingStatus = "confirmed" | "cancelled" | "completed" | "no_show";
 export type BookingInput = z.infer<typeof bookingSchema>;
 
-function getPublicClient() {
+export function getPublicClient() {
   const url = import.meta.env?.VITE_SUPABASE_URL || process.env?.["SUPABASE_URL"];
   const key = import.meta.env?.VITE_SUPABASE_ANON_KEY || process.env?.["SUPABASE_PUBLISHABLE_KEY"];
   if (!url || !key) return null;
@@ -146,6 +149,63 @@ export function evaluateSlotAndCustomer({
 export async function createBooking({ data }: { data: BookingInput }) {
   const validated = bookingSchema.parse(data);
   const supabase = getPublicClient();
+
+  // ─── Server-side validation: Ensure no out-of-stock items can be booked/ordered ───
+  if (validated.items && validated.items.length > 0) {
+    const outOfStockIds = new Set(getOutOfStockItemIds());
+    const storedMenu = getStoredMenu();
+
+    let dbMenuMap: Map<string, boolean> | null = null;
+    if (supabase) {
+      try {
+        const { data: dbItems } = await supabase
+          .from("menu_items")
+          .select("id, name, is_available");
+        if (dbItems && dbItems.length > 0) {
+          dbMenuMap = new Map();
+          for (const item of dbItems) {
+            if (item.id) dbMenuMap.set(item.id.toLowerCase(), item.is_available);
+            if (item.name) dbMenuMap.set(item.name.toLowerCase(), item.is_available);
+          }
+        }
+      } catch (err) {
+        console.warn("Supabase live stock check note:", err);
+      }
+    }
+
+    const unavailableNames: string[] = [];
+    for (const item of validated.items) {
+      let unavailable = false;
+      if (outOfStockIds.has(item.id)) {
+        unavailable = true;
+      }
+      const stored = storedMenu.find(
+        (m) => m.id === item.id || m.name.toLowerCase() === item.name.toLowerCase()
+      );
+      if (stored && stored.isAvailable === false) {
+        unavailable = true;
+      }
+      if (dbMenuMap) {
+        const dbAvailable =
+          dbMenuMap.get(item.id.toLowerCase()) ?? dbMenuMap.get(item.name.toLowerCase());
+        if (dbAvailable === false) {
+          unavailable = true;
+        }
+      }
+      if (unavailable) {
+        unavailableNames.push(item.name);
+      }
+    }
+
+    if (unavailableNames.length > 0) {
+      const uniqueNames = Array.from(new Set(unavailableNames));
+      throw new Error(
+        `Cannot complete reservation: "${uniqueNames.join('", "')}" ${
+          uniqueNames.length === 1 ? "is" : "are"
+        } currently out of stock. Please remove from your order.`
+      );
+    }
+  }
 
   if (supabase) {
     const { error } = await supabase.from("bookings").insert({
