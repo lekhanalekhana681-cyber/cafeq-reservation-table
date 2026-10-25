@@ -58,9 +58,44 @@ function getPublicClient() {
   });
 }
 
+const memoryStorage = new Map<string, string>();
+
+function safeGetItem(key: string): string | null {
+  try {
+    if (typeof localStorage !== "undefined") {
+      return localStorage.getItem(key);
+    }
+  } catch {
+    // fallback
+  }
+  return memoryStorage.get(key) || null;
+}
+
+function safeSetItem(key: string, value: string): void {
+  memoryStorage.set(key, value);
+  try {
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem(key, value);
+    }
+  } catch {
+    // fallback
+  }
+}
+
+function safeRemoveItem(key: string): void {
+  memoryStorage.delete(key);
+  try {
+    if (typeof localStorage !== "undefined") {
+      localStorage.removeItem(key);
+    }
+  } catch {
+    // fallback
+  }
+}
+
 function getLocalUsers(): StoredUser[] {
   try {
-    const raw = localStorage.getItem(STORAGE_USERS_KEY);
+    const raw = safeGetItem(STORAGE_USERS_KEY);
     return raw ? JSON.parse(raw) : [];
   } catch {
     return [];
@@ -69,7 +104,7 @@ function getLocalUsers(): StoredUser[] {
 
 function saveLocalUsers(users: StoredUser[]): void {
   try {
-    localStorage.setItem(STORAGE_USERS_KEY, JSON.stringify(users));
+    safeSetItem(STORAGE_USERS_KEY, JSON.stringify(users));
   } catch (err) {
     console.error("Failed to save users to local storage:", err);
   }
@@ -83,7 +118,7 @@ interface RateLimitRecord {
 
 function getRateLimits(): Record<string, RateLimitRecord> {
   try {
-    const raw = localStorage.getItem(STORAGE_RATELIMIT_KEY);
+    const raw = safeGetItem(STORAGE_RATELIMIT_KEY);
     return raw ? JSON.parse(raw) : {};
   } catch {
     return {};
@@ -117,7 +152,7 @@ function recordFailedAttempt(identifier: string): void {
       current.attempts = 0; // reset counter after locking
     }
     limits[key] = current;
-    localStorage.setItem(STORAGE_RATELIMIT_KEY, JSON.stringify(limits));
+    safeSetItem(STORAGE_RATELIMIT_KEY, JSON.stringify(limits));
   } catch {
     // Ignore storage errors
   }
@@ -129,37 +164,116 @@ function clearRateLimit(identifier: string): void {
     const key = identifier.toLowerCase();
     if (limits[key]) {
       delete limits[key];
-      localStorage.setItem(STORAGE_RATELIMIT_KEY, JSON.stringify(limits));
+      safeSetItem(STORAGE_RATELIMIT_KEY, JSON.stringify(limits));
     }
   } catch {
     // Ignore
   }
 }
 
-// ----------------- Session Helpers -----------------
-function generateSimpleToken(userId: string): string {
-  const payload = {
-    sub: userId,
-    iat: Date.now(),
-    rnd: Math.random().toString(36).slice(2),
+// ----------------- JWT Token & Session Helpers -----------------
+const JWT_SECRET =
+  (typeof process !== "undefined" ? process.env?.["VITE_JWT_SECRET"] || process.env?.["JWT_SECRET"] : undefined) ||
+  import.meta.env?.VITE_JWT_SECRET ||
+  "cafeq_secure_jwt_secret_key_2026_x89";
+
+function base64UrlEncode(str: string): string {
+  if (typeof btoa !== "undefined") {
+    return btoa(encodeURIComponent(str).replace(/%([0-9A-F]{2})/g, (_, p1) => String.fromCharCode(parseInt(p1, 16))))
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/, "");
+  }
+  return Buffer.from(str).toString("base64url");
+}
+
+function base64UrlDecode(str: string): string {
+  let base64 = str.replace(/-/g, "+").replace(/_/g, "/");
+  while (base64.length % 4) {
+    base64 += "=";
+  }
+  if (typeof atob !== "undefined") {
+    const raw = atob(base64);
+    return decodeURIComponent(
+      Array.prototype.map.call(raw, (c: string) => "%" + ("00" + c.charCodeAt(0).toString(16)).slice(-2)).join("")
+    );
+  }
+  return Buffer.from(base64, "base64").toString("utf-8");
+}
+
+function simpleSignature(input: string, secret: string): string {
+  let hash = 0;
+  const combined = input + ":" + secret;
+  for (let i = 0; i < combined.length; i++) {
+    const char = combined.charCodeAt(i);
+    hash = (hash << 5) - hash + char;
+    hash |= 0;
+  }
+  return base64UrlEncode(Math.abs(hash).toString(36) + "_" + combined.length);
+}
+
+export function generateJwtToken(user: User, durationMs: number = USER_SESSION_TIMEOUT_MS): string {
+  const header = {
+    alg: "HS256",
+    typ: "JWT",
   };
-  return btoa(JSON.stringify(payload));
+  const nowSec = Math.floor(Date.now() / 1000);
+  const expSec = Math.floor((Date.now() + durationMs) / 1000);
+  const payload = {
+    sub: user.id,
+    name: user.name,
+    email: user.email,
+    phone: user.phone,
+    role: user.role,
+    iat: nowSec,
+    exp: expSec,
+    iss: "cafeq-auth",
+  };
+
+  const headerEncoded = base64UrlEncode(JSON.stringify(header));
+  const payloadEncoded = base64UrlEncode(JSON.stringify(payload));
+  const signatureEncoded = simpleSignature(`${headerEncoded}.${payloadEncoded}`, JWT_SECRET);
+
+  return `${headerEncoded}.${payloadEncoded}.${signatureEncoded}`;
+}
+
+export function verifyJwtToken(token: string): { valid: boolean; payload?: any } {
+  try {
+    const parts = token.split(".");
+    if (parts.length !== 3) return { valid: false };
+    const [headerEnc, payloadEnc, signatureEnc] = parts;
+    const expectedSig = simpleSignature(`${headerEnc}.${payloadEnc}`, JWT_SECRET);
+    if (signatureEnc !== expectedSig) {
+      return { valid: false };
+    }
+    const payload = JSON.parse(base64UrlDecode(payloadEnc));
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (payload.exp && payload.exp < nowSec) {
+      return { valid: false };
+    }
+    return { valid: true, payload };
+  } catch {
+    return { valid: false };
+  }
 }
 
 function saveSession(user: User, durationMs: number = USER_SESSION_TIMEOUT_MS): AuthSession {
-  const token = generateSimpleToken(user.id);
+  const token = generateJwtToken(user, durationMs);
   const session: AuthSession = {
     token,
     user,
     expiresAt: Date.now() + durationMs,
   };
   try {
-    localStorage.setItem(STORAGE_SESSION_KEY, JSON.stringify(session));
+    safeSetItem(STORAGE_SESSION_KEY, JSON.stringify(session));
     if (user.role === "admin") {
-      localStorage.setItem(STORAGE_ADMIN_SESSION_KEY, JSON.stringify(session));
+      safeSetItem(STORAGE_ADMIN_SESSION_KEY, JSON.stringify(session));
     }
     if (user.role === "kitchen") {
-      localStorage.setItem(STORAGE_KITCHEN_SESSION_KEY, JSON.stringify(session));
+      safeSetItem(STORAGE_KITCHEN_SESSION_KEY, JSON.stringify(session));
+    }
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent("cafeq_auth_changed", { detail: { user, token } }));
     }
   } catch (err) {
     console.error("Failed to save auth session:", err);
@@ -169,14 +283,22 @@ function saveSession(user: User, durationMs: number = USER_SESSION_TIMEOUT_MS): 
 
 export function getCurrentSession(): AuthSession | null {
   try {
-    const raw = localStorage.getItem(STORAGE_SESSION_KEY);
+    const raw = safeGetItem(STORAGE_SESSION_KEY);
     if (!raw) return null;
     const session: AuthSession = JSON.parse(raw);
     if (session.expiresAt && session.expiresAt < Date.now()) {
-      localStorage.removeItem(STORAGE_SESSION_KEY);
-      localStorage.removeItem(STORAGE_ADMIN_SESSION_KEY);
-      localStorage.removeItem(STORAGE_KITCHEN_SESSION_KEY);
+      safeRemoveItem(STORAGE_SESSION_KEY);
+      safeRemoveItem(STORAGE_ADMIN_SESSION_KEY);
+      safeRemoveItem(STORAGE_KITCHEN_SESSION_KEY);
       return null;
+    }
+    // Verify JWT integrity
+    if (session.token) {
+      const verified = verifyJwtToken(session.token);
+      if (!verified.valid) {
+        safeRemoveItem(STORAGE_SESSION_KEY);
+        return null;
+      }
     }
     return session;
   } catch {
@@ -186,11 +308,11 @@ export function getCurrentSession(): AuthSession | null {
 
 export function getAdminSession(): AuthSession | null {
   try {
-    const raw = localStorage.getItem(STORAGE_ADMIN_SESSION_KEY) || localStorage.getItem(STORAGE_SESSION_KEY);
+    const raw = safeGetItem(STORAGE_ADMIN_SESSION_KEY) || safeGetItem(STORAGE_SESSION_KEY);
     if (!raw) return null;
     const session: AuthSession = JSON.parse(raw);
     if (session.expiresAt && session.expiresAt < Date.now()) {
-      localStorage.removeItem(STORAGE_ADMIN_SESSION_KEY);
+      safeRemoveItem(STORAGE_ADMIN_SESSION_KEY);
       return null;
     }
     if (session.user?.role !== "admin") {
@@ -204,11 +326,11 @@ export function getAdminSession(): AuthSession | null {
 
 export function getKitchenSession(): AuthSession | null {
   try {
-    const raw = localStorage.getItem(STORAGE_KITCHEN_SESSION_KEY) || localStorage.getItem(STORAGE_SESSION_KEY);
+    const raw = safeGetItem(STORAGE_KITCHEN_SESSION_KEY) || safeGetItem(STORAGE_SESSION_KEY);
     if (!raw) return null;
     const session: AuthSession = JSON.parse(raw);
     if (session.expiresAt && session.expiresAt < Date.now()) {
-      localStorage.removeItem(STORAGE_KITCHEN_SESSION_KEY);
+      safeRemoveItem(STORAGE_KITCHEN_SESSION_KEY);
       return null;
     }
     // Kitchen access allowed for role "kitchen" OR "admin" (Admin can access both)
@@ -740,11 +862,13 @@ export async function changeAdminPassword({
 
 export function logoutAdmin(): void {
   try {
-    localStorage.removeItem(STORAGE_ADMIN_SESSION_KEY);
-    // If the active global session belongs to this admin, remove it too
+    safeRemoveItem(STORAGE_ADMIN_SESSION_KEY);
     const current = getCurrentSession();
     if (current?.user.role === "admin") {
-      localStorage.removeItem(STORAGE_SESSION_KEY);
+      safeRemoveItem(STORAGE_SESSION_KEY);
+    }
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent("cafeq_auth_changed", { detail: { user: null } }));
     }
   } catch (err) {
     console.error("Failed to clear admin session:", err);
@@ -753,8 +877,15 @@ export function logoutAdmin(): void {
 
 export function logoutUser(): void {
   try {
-    localStorage.removeItem(STORAGE_SESSION_KEY);
-    localStorage.removeItem(STORAGE_ADMIN_SESSION_KEY);
+    safeRemoveItem(STORAGE_SESSION_KEY);
+    safeRemoveItem(STORAGE_ADMIN_SESSION_KEY);
+    safeRemoveItem(STORAGE_KITCHEN_SESSION_KEY);
+    if (typeof sessionStorage !== "undefined") {
+      sessionStorage.clear();
+    }
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent("cafeq_auth_changed", { detail: { user: null } }));
+    }
   } catch (err) {
     console.error("Failed to remove session:", err);
   }
@@ -1153,10 +1284,13 @@ export async function loginKitchen({
 
 export function logoutKitchen(): void {
   try {
-    localStorage.removeItem(STORAGE_KITCHEN_SESSION_KEY);
+    safeRemoveItem(STORAGE_KITCHEN_SESSION_KEY);
     const current = getCurrentSession();
     if (current?.user.role === "kitchen") {
-      localStorage.removeItem(STORAGE_SESSION_KEY);
+      safeRemoveItem(STORAGE_SESSION_KEY);
+    }
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent("cafeq_auth_changed", { detail: { user: null } }));
     }
   } catch (err) {
     console.error("Failed to clear kitchen session:", err);

@@ -7,7 +7,7 @@
 export interface AuditLogRecord {
   id: string;
   timestamp: string; // ISO string
-  user: string;      // e.g. "Admin (CafeQ)", "Customer (Lekhana B S)", "System"
+  user: string;      // e.g. "Admin (CafeQ)", "Customer (Alex Morgan)", "System"
   action: string;    // e.g. "LOGIN", "RESERVATION_CREATED", "RESERVATION_CANCELLED", "MENU_UPDATED"
   category: "auth" | "reservation" | "menu" | "system";
   details: string;

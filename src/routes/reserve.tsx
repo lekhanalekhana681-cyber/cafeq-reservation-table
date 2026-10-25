@@ -179,14 +179,18 @@ function ReservePage() {
     }
   }, [authLoading, isAuthenticated, navigate]);
 
-  // Pre-fill fields from user profile
+  // Dynamic pre-fill fields from authenticated user profile
   useEffect(() => {
     if (user) {
-      if (!name && user.name) setName(user.name);
-      if (!phone && user.phone) setPhone(user.phone);
-      if (!email && user.email) setEmail(user.email);
+      setName(user.name || "");
+      setPhone(user.phone || "");
+      setEmail(user.email || "");
+    } else {
+      setName("");
+      setPhone("");
+      setEmail("");
     }
-  }, [user]);
+  }, [user?.id, user?.name, user?.email, user?.phone]);
 
   // Menu items & real-time sync
   const [menuItems, setMenuItems] = useState<MenuItem[]>(() => getStoredMenu());
@@ -1387,7 +1391,7 @@ function ReservePage() {
                   id="name"
                   value={name}
                   onChange={(e) => setName(e.target.value)}
-                  placeholder="Lekhana B S"
+                  placeholder={user?.name || "e.g. Alex Morgan"}
                   className="mt-1.5"
                   required
                 />
@@ -1399,7 +1403,7 @@ function ReservePage() {
                   type="tel"
                   value={phone}
                   onChange={(e) => setPhone(e.target.value)}
-                  placeholder="+91 90000 00000"
+                  placeholder={user?.phone || "+91 90000 00000"}
                   className="mt-1.5"
                   required
                 />
@@ -1416,7 +1420,7 @@ function ReservePage() {
                   type="email"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
-                  placeholder="lekhana@example.com"
+                  placeholder={user?.email || "e.g. alex@example.com"}
                   className="mt-1.5 text-xs"
                 />
               </div>

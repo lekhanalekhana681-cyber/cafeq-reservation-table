@@ -74,11 +74,13 @@ export async function logNotificationDelivery({
 
   // Local storage fallback
   try {
-    const existing: DeliveryLogRecord[] = JSON.parse(localStorage.getItem(STORAGE_LOGS_KEY) || "[]");
-    existing.unshift(logRecord);
-    // Keep max 200 logs
-    if (existing.length > 200) existing.pop();
-    localStorage.setItem(STORAGE_LOGS_KEY, JSON.stringify(existing));
+    if (typeof localStorage !== "undefined") {
+      const existing: DeliveryLogRecord[] = JSON.parse(localStorage.getItem(STORAGE_LOGS_KEY) || "[]");
+      existing.unshift(logRecord);
+      // Keep max 200 logs
+      if (existing.length > 200) existing.pop();
+      localStorage.setItem(STORAGE_LOGS_KEY, JSON.stringify(existing));
+    }
   } catch (err) {
     console.error("Failed to save delivery log to local storage:", err);
   }

@@ -43,6 +43,7 @@ export interface Database {
           actual_arrival_time?: string | null;
           confirmed_at?: string;
           created_at: string;
+          user_id?: string | null;
         };
         Insert: {
           id?: string;
@@ -77,6 +78,7 @@ export interface Database {
           actual_arrival_time?: string | null;
           confirmed_at?: string;
           created_at?: string;
+          user_id?: string | null;
         };
         Update: {
           id?: string;
@@ -111,6 +113,42 @@ export interface Database {
           actual_arrival_time?: string | null;
           confirmed_at?: string;
           created_at?: string;
+          user_id?: string | null;
+        };
+      };
+      users: {
+        Row: {
+          id: string;
+          name: string;
+          email: string;
+          phone: string;
+          role: string;
+          password_hash: string;
+          username?: string | null;
+          created_at: string;
+          updated_at?: string;
+        };
+        Insert: {
+          id?: string;
+          name: string;
+          email: string;
+          phone: string;
+          role?: string;
+          password_hash: string;
+          username?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          name?: string;
+          email?: string;
+          phone?: string;
+          role?: string;
+          password_hash?: string;
+          username?: string | null;
+          created_at?: string;
+          updated_at?: string;
         };
       };
       customers: {

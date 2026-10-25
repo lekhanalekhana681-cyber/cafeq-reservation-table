@@ -90,12 +90,16 @@ export function SiteHeader() {
               )}
 
               {/* User greeting */}
-              <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-secondary/70 border border-border/60 text-xs font-medium text-foreground">
-                <div className="size-5 rounded-full bg-accent/20 text-accent flex items-center justify-center">
+              <Link
+                to="/users"
+                className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-secondary/70 hover:bg-secondary border border-border/60 text-xs font-medium text-foreground transition-colors group cursor-pointer"
+                title="View User Profile"
+              >
+                <div className="size-5 rounded-full bg-accent/20 text-accent flex items-center justify-center group-hover:scale-105 transition-transform">
                   <UserIcon className="size-3" />
                 </div>
                 <span className="max-w-[120px] truncate">{user.name}</span>
-              </div>
+              </Link>
 
               {/* Logout Button */}
               <Button
@@ -162,7 +166,12 @@ export function SiteHeader() {
         <div className="md:hidden border-t border-border/60 bg-background/95 px-5 py-4 backdrop-blur-lg animate-in slide-in-from-top-2">
           {isAuthenticated && user && (
             <div className="mb-4 pb-3 border-b border-border/60 flex items-center justify-between">
-              <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
+              <Link
+                to="/users"
+                onClick={() => setMobileMenuOpen(false)}
+                className="flex items-center gap-2 text-sm font-semibold text-foreground hover:text-accent transition-colors"
+                title="View Profile"
+              >
                 <div className="size-7 rounded-full bg-accent/20 text-accent flex items-center justify-center">
                   <UserIcon className="size-4" />
                 </div>
@@ -170,7 +179,7 @@ export function SiteHeader() {
                   <p className="leading-tight">{user.name}</p>
                   <p className="text-[11px] font-normal text-muted-foreground">{user.email}</p>
                 </div>
-              </div>
+              </Link>
               <Button
                 variant="outline"
                 size="sm"

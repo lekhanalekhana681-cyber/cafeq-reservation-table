@@ -43,6 +43,30 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     refreshUser();
+
+    const handleStorageChange = (e: StorageEvent) => {
+      if (e.key === "cafeq_auth_session" || e.key === null) {
+        refreshUser();
+      }
+    };
+
+    const handleAuthCustomEvent = (e: Event) => {
+      const custom = e as CustomEvent<{ user?: User | null }>;
+      if (custom.detail && custom.detail.user !== undefined) {
+        setUser(custom.detail.user);
+        setIsLoading(false);
+      } else {
+        refreshUser();
+      }
+    };
+
+    window.addEventListener("storage", handleStorageChange);
+    window.addEventListener("cafeq_auth_changed", handleAuthCustomEvent);
+
+    return () => {
+      window.removeEventListener("storage", handleStorageChange);
+      window.removeEventListener("cafeq_auth_changed", handleAuthCustomEvent);
+    };
   }, []);
 
   const handleLogin = async (credentials: { email: string; password: string }): Promise<AuthResponse> => {

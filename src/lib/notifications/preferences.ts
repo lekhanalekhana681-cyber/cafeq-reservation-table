@@ -66,13 +66,15 @@ export async function getUserNotificationPreferences(identifier: {
 
   // Local storage fallback
   try {
-    const allPrefs: Record<string, NotificationPreferences> = JSON.parse(
-      localStorage.getItem(STORAGE_PREFS_KEY) || "{}"
-    );
+    if (typeof localStorage !== "undefined") {
+      const allPrefs: Record<string, NotificationPreferences> = JSON.parse(
+        localStorage.getItem(STORAGE_PREFS_KEY) || "{}"
+      );
 
-    const key = identifier.userId || cleanPhone || cleanEmail;
-    if (key && allPrefs[key]) {
-      return { ...DEFAULT_PREFERENCES, ...allPrefs[key] };
+      const key = identifier.userId || cleanPhone || cleanEmail;
+      if (key && allPrefs[key]) {
+        return { ...DEFAULT_PREFERENCES, ...allPrefs[key] };
+      }
     }
   } catch (err) {
     console.error("Local preferences read error:", err);

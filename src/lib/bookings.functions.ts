@@ -69,7 +69,12 @@ import { getStoredMenu } from "@/lib/menu";
 export type BookingStatus = "confirmed" | "cancelled" | "completed" | "no_show";
 export type BookingInput = z.infer<typeof bookingSchema>;
 
+import { getSupabaseClient } from "@/integrations/supabase/client";
+
 export function getPublicClient() {
+  const client = getSupabaseClient();
+  if (client) return client;
+
   const url = import.meta.env?.VITE_SUPABASE_URL || process.env?.["SUPABASE_URL"];
   const key = import.meta.env?.VITE_SUPABASE_ANON_KEY || process.env?.["SUPABASE_PUBLISHABLE_KEY"];
   if (!url || !key) return null;
@@ -90,6 +95,33 @@ export function getPublicClient() {
       },
     },
   });
+}
+
+const memoryBookings = new Map<string, string>();
+
+function safeGetBookings(): BookingInput[] {
+  try {
+    if (typeof localStorage !== "undefined") {
+      const raw = localStorage.getItem("cafeq_bookings");
+      return raw ? JSON.parse(raw) : [];
+    }
+  } catch {
+    // fallback
+  }
+  const rawMem = memoryBookings.get("cafeq_bookings");
+  return rawMem ? JSON.parse(rawMem) : [];
+}
+
+function safeSaveBookings(bookings: BookingInput[]): void {
+  const json = JSON.stringify(bookings);
+  memoryBookings.set("cafeq_bookings", json);
+  try {
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem("cafeq_bookings", json);
+    }
+  } catch {
+    // fallback
+  }
 }
 
 export function evaluateSlotAndCustomer({
@@ -254,11 +286,11 @@ export async function createBooking({ data }: { data: BookingInput }) {
       if (rpcErr) console.warn("Customer visit tracking note:", rpcErr.message);
     });
   } else {
-    // Local fallback persistence
+    // Fallback persistence
     try {
-      const existing: BookingInput[] = JSON.parse(localStorage.getItem("cafeq_bookings") || "[]");
+      const existing = safeGetBookings();
       existing.push(validated);
-      localStorage.setItem("cafeq_bookings", JSON.stringify(existing));
+      safeSaveBookings(existing);
     } catch {
       // Non-browser fallback
     }
@@ -632,7 +664,13 @@ export async function getUserBookings(query: UserBookingsQuery): Promise<Booking
   if (supabase) {
     let dbQuery = supabase.from("bookings").select("*").order("created_at", { ascending: false });
 
-    if (userId) {
+    if (userId && cleanEmail && cleanPhone) {
+      dbQuery = dbQuery.or(`user_id.eq.${userId},customer_email.eq.${cleanEmail},phone.eq.${cleanPhone}`);
+    } else if (userId && cleanEmail) {
+      dbQuery = dbQuery.or(`user_id.eq.${userId},customer_email.eq.${cleanEmail}`);
+    } else if (userId && cleanPhone) {
+      dbQuery = dbQuery.or(`user_id.eq.${userId},phone.eq.${cleanPhone}`);
+    } else if (userId) {
       dbQuery = dbQuery.eq("user_id", userId);
     } else if (cleanPhone) {
       dbQuery = dbQuery.eq("phone", cleanPhone);
@@ -676,9 +714,9 @@ export async function getUserBookings(query: UserBookingsQuery): Promise<Booking
     }
   }
 
-  // Fallback to local storage
+  // Fallback persistence
   try {
-    const existing: BookingInput[] = JSON.parse(localStorage.getItem("cafeq_bookings") || "[]");
+    const existing = safeGetBookings();
     return existing.filter((b) => {
       if (userId && b.userId === userId) return true;
       if (cleanEmail && b.customerEmail?.toLowerCase() === cleanEmail) return true;
@@ -706,11 +744,11 @@ export async function updateBookingStatus({
   }
 
   try {
-    const existing: BookingInput[] = JSON.parse(localStorage.getItem("cafeq_bookings") || "[]");
+    const existing = safeGetBookings();
     const updated = existing.map((b) => (b.code === code ? { ...b, status } : b));
-    localStorage.setItem("cafeq_bookings", JSON.stringify(updated));
+    safeSaveBookings(updated);
   } catch (err) {
-    console.error("Failed to update status in localStorage:", err);
+    console.error("Failed to update status in storage:", err);
   }
 
   return { success: true };
