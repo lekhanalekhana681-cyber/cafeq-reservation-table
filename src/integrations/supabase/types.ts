@@ -53,6 +53,12 @@ export interface Database {
           pickup_time?: string | null;
           delivery_fee?: number | null;
           packaging_charge?: number | null;
+          kitchen_status?: "new" | "preparing" | "ready" | "completed" | "cancelled";
+          accepted_at?: string | null;
+          ready_at?: string | null;
+          completed_at?: string | null;
+          cancellation_reason?: string | null;
+          cancelled_by?: string | null;
         };
         Insert: {
           id?: string;
@@ -97,6 +103,12 @@ export interface Database {
           pickup_time?: string | null;
           delivery_fee?: number | null;
           packaging_charge?: number | null;
+          kitchen_status?: "new" | "preparing" | "ready" | "completed" | "cancelled";
+          accepted_at?: string | null;
+          ready_at?: string | null;
+          completed_at?: string | null;
+          cancellation_reason?: string | null;
+          cancelled_by?: string | null;
         };
         Update: {
           id?: string;
@@ -141,6 +153,12 @@ export interface Database {
           pickup_time?: string | null;
           delivery_fee?: number | null;
           packaging_charge?: number | null;
+          kitchen_status?: "new" | "preparing" | "ready" | "completed" | "cancelled";
+          accepted_at?: string | null;
+          ready_at?: string | null;
+          completed_at?: string | null;
+          cancellation_reason?: string | null;
+          cancelled_by?: string | null;
         };
       };
       users: {
@@ -460,6 +478,17 @@ export interface Database {
           _amount: number;
         };
         Returns: void;
+      };
+      kds_set_item_status: {
+        Args: {
+          _code: string;
+          _item_ids: string[];
+          _next: string;
+          _expected?: string | null;
+          _reason?: string | null;
+          _actor?: string | null;
+        };
+        Returns: Database["public"]["Tables"]["bookings"]["Row"];
       };
     };
     Enums: {

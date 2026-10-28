@@ -16,6 +16,17 @@ import {
   normalizeOrderType,
   validateOrderDetails,
 } from "@/lib/order-types";
+import {
+  ITEM_STATUSES,
+  ItemTransitionError,
+  applyItemTransition,
+  backfillItemStatus,
+  deriveTicketStatus,
+  getNextItemStatus,
+  type ItemStatus,
+  type TicketStatus,
+} from "@/lib/order-items";
+import { getKitchenSession } from "@/lib/auth";
 
 export const orderItemSchema = z.object({
   id: z.string(),
@@ -24,13 +35,24 @@ export const orderItemSchema = z.object({
   price: z.number().min(0),
   prepTimeMinutes: z.number().optional().default(5),
   fulfillment: z.enum(["pre_ordered", "at_table"]).default("pre_ordered"),
-  status: z.enum(["pending", "done"]).default("pending"),
+  // Legacy "pending"/"done" values are accepted and mapped to the per-item stages
+  status: z
+    .preprocess(
+      (v) => (v === "done" ? "READY" : typeof v === "string" ? v.toUpperCase() : v),
+      z.enum(ITEM_STATUSES)
+    )
+    .default("PENDING"),
+  startedAt: z.string().nullable().optional(),
+  readyAt: z.string().nullable().optional(),
+  servedAt: z.string().nullable().optional(),
+  cancelledAt: z.string().nullable().optional(),
   category: z.string().optional(),
   isVeg: z.boolean().optional(),
 });
 
 export type OrderItem = z.infer<typeof orderItemSchema>;
-export type KitchenStatus = "new" | "preparing" | "ready" | "completed" | "cancelled";
+export type KitchenStatus = TicketStatus;
+export type { ItemStatus };
 
 // Accepts legacy lowercase values ("dine_in") but always yields the uppercase enum.
 const orderTypeSchema = z.preprocess(
@@ -77,11 +99,14 @@ const bookingSchema = z.object({
   pickupTime: z.string().max(50).optional().nullable(),
   deliveryFee: z.number().min(0).optional().nullable().default(0),
   packagingCharge: z.number().min(0).optional().nullable().default(0),
-  cancellationReason: z.string().optional(),
-  cancelledBy: z.enum(["customer", "admin", "kitchen"]).optional(),
-  acceptedAt: z.string().optional(),
-  readyAt: z.string().optional(),
-  completedAt: z.string().optional(),
+  cancellationReason: z.string().nullable().optional(),
+  cancelledBy: z.enum(["customer", "admin", "kitchen"]).nullable().optional(),
+  // Ticket-level kitchen timestamps (ISO). acceptedAt = first item started.
+  acceptedAt: z.string().nullable().optional(),
+  readyAt: z.string().nullable().optional(),
+  completedAt: z.string().nullable().optional(),
+  /** When the order was placed — the KDS timer counts from here. */
+  createdAt: z.string().nullable().optional(),
 });
 
 import { getOutOfStockItemIds } from "@/lib/stock";
@@ -120,7 +145,7 @@ export function getPublicClient() {
 
 type BookingRow = Database["public"]["Tables"]["bookings"]["Row"];
 
-/** Maps the order-type columns of a bookings row to BookingInput fields. */
+/** Maps the order-type and kitchen columns of a bookings row to BookingInput fields. */
 function mapOrderTypeFields(d: Partial<BookingRow>) {
   return {
     orderType: normalizeOrderType(d.order_type),
@@ -132,7 +157,64 @@ function mapOrderTypeFields(d: Partial<BookingRow>) {
     pickupTime: d.pickup_time ?? null,
     deliveryFee: Number(d.delivery_fee ?? 0),
     packagingCharge: Number(d.packaging_charge ?? 0),
+    kitchenStatus: (d.kitchen_status as KitchenStatus | undefined) ?? "new",
+    acceptedAt: d.accepted_at ?? null,
+    readyAt: d.ready_at ?? null,
+    completedAt: d.completed_at ?? null,
+    cancellationReason: d.cancellation_reason ?? null,
+    cancelledBy: (d.cancelled_by as BookingInput["cancelledBy"]) ?? null,
+    createdAt: d.created_at ?? null,
   };
+}
+
+function mapBookingRow(d: BookingRow): BookingInput {
+  return {
+    code: d.code,
+    date: d.date,
+    time: d.time,
+    party: d.party,
+    seating: d.seating,
+    tableType: d.table_type || "window",
+    hasPreorder: d.has_preorder || false,
+    estimatedPrepTime: d.estimated_prep_time || 0,
+    foodReadyTime: d.food_ready_time || null,
+    isPeakHour: d.is_peak_hour || false,
+    depositRequired: d.deposit_required || false,
+    depositAmount: d.deposit_amount || 0,
+    kitchenLoad: (d.kitchen_load as "normal" | "busy" | "high") || "normal",
+    name: d.name,
+    phone: d.phone,
+    customerEmail: d.customer_email || undefined,
+    notes: d.notes || undefined,
+    dietary: d.dietary || [],
+    occasion: d.occasion || undefined,
+    accessibility: d.accessibility || [],
+    windowPriority: d.window_priority || false,
+    items: (d.items as OrderItem[]) || [],
+    total: d.total || 0,
+    paymentMethod: (d.payment_method as BookingInput["paymentMethod"]) || "pay_on_arrival",
+    paymentStatus: (d.payment_status as BookingInput["paymentStatus"]) || "pending_cash",
+    paymentReference: d.payment_reference || undefined,
+    userId: d.user_id || undefined,
+    ...mapOrderTypeFields(d),
+    status: (d.status as BookingStatus) || "confirmed",
+  };
+}
+
+/**
+ * Normalizes item statuses (backfilling pre-per-item orders from their ticket state)
+ * and derives the ticket-level kitchen status from the items.
+ */
+export function withKitchenState(b: BookingInput): BookingInput {
+  const items = (b.items || []).map((item) => ({
+    ...item,
+    status: backfillItemStatus(item.status, b),
+  }));
+  let kitchenStatus: KitchenStatus;
+  if (b.status === "cancelled") kitchenStatus = "cancelled";
+  else if (b.status === "completed") kitchenStatus = "completed";
+  else kitchenStatus = items.length > 0 ? deriveTicketStatus(items) : b.kitchenStatus || "new";
+  return { ...b, items, kitchenStatus };
 }
 
 const memoryBookings = new Map<string, string>();
@@ -219,6 +301,18 @@ export function evaluateSlotAndCustomer({
 export async function createBooking({ data }: { data: BookingInput }) {
   const validated = bookingSchema.parse(data);
   const supabase = getPublicClient();
+
+  // New orders always start in the kitchen queue with every item pending
+  validated.items = validated.items.map((item) => ({
+    ...item,
+    status: "PENDING" as const,
+    startedAt: null,
+    readyAt: null,
+    servedAt: null,
+    cancelledAt: null,
+  }));
+  validated.kitchenStatus = "new";
+  validated.createdAt = new Date().toISOString();
 
   // ─── Order type rules (mirrored by the enforce_order_type_rules DB trigger) ───
   const orderType = validated.orderType;
@@ -352,6 +446,7 @@ export async function createBooking({ data }: { data: BookingInput }) {
       pickup_time: validated.pickupTime,
       delivery_fee: validated.deliveryFee,
       packaging_charge: validated.packagingCharge,
+      kitchen_status: "new",
     });
 
     if (error) {
@@ -775,49 +870,21 @@ export async function getUserBookings(query: UserBookingsQuery): Promise<Booking
     const { data, error } = await dbQuery;
 
     if (!error && data && data.length > 0) {
-      return data.map((d) => ({
-        code: d.code,
-        date: d.date,
-        time: d.time,
-        party: d.party,
-        seating: d.seating,
-        tableType: d.table_type || "window",
-        hasPreorder: d.has_preorder || false,
-        estimatedPrepTime: d.estimated_prep_time || 0,
-        foodReadyTime: d.food_ready_time || null,
-        isPeakHour: d.is_peak_hour || false,
-        depositRequired: d.deposit_required || false,
-        depositAmount: d.deposit_amount || 0,
-        kitchenLoad: (d.kitchen_load as "normal" | "busy" | "high") || "normal",
-        name: d.name,
-        phone: d.phone,
-        customerEmail: d.customer_email || undefined,
-        notes: d.notes || undefined,
-        dietary: d.dietary || [],
-        occasion: d.occasion || undefined,
-        accessibility: d.accessibility || [],
-        windowPriority: d.window_priority || false,
-        items: (d.items as OrderItem[]) || [],
-        total: d.total || 0,
-        paymentMethod: (d.payment_method as "pay_on_arrival" | "upi_prepay") || "pay_on_arrival",
-        paymentStatus: (d.payment_status as "pending_cash" | "pending_qr" | "paid") || "pending_cash",
-        paymentReference: d.payment_reference || undefined,
-        userId: d.user_id || undefined,
-        ...mapOrderTypeFields(d),
-        status: (d.status as "confirmed" | "cancelled") || "confirmed",
-      }));
+      return data.map((d) => withKitchenState(mapBookingRow(d)));
     }
   }
 
   // Fallback persistence
   try {
     const existing = safeGetBookings();
-    return existing.filter((b) => {
-      if (userId && b.userId === userId) return true;
-      if (cleanEmail && b.customerEmail?.toLowerCase() === cleanEmail) return true;
-      if (cleanPhone && b.phone.replace(/\D/g, "") === cleanPhone.replace(/\D/g, "")) return true;
-      return false;
-    });
+    return existing
+      .filter((b) => {
+        if (userId && b.userId === userId) return true;
+        if (cleanEmail && b.customerEmail?.toLowerCase() === cleanEmail) return true;
+        if (cleanPhone && b.phone.replace(/\D/g, "") === cleanPhone.replace(/\D/g, "")) return true;
+        return false;
+      })
+      .map(withKitchenState);
   } catch {
     return [];
   }
@@ -859,50 +926,216 @@ export async function getAllBookings(): Promise<BookingInput[]> {
       .order("time", { ascending: false });
 
     if (!error && data && data.length > 0) {
-      return data.map((d) => ({
-        code: d.code,
-        date: d.date,
-        time: d.time,
-        party: d.party,
-        seating: d.seating,
-        tableType: d.table_type || "window",
-        hasPreorder: d.has_preorder || false,
-        estimatedPrepTime: d.estimated_prep_time || 0,
-        foodReadyTime: d.food_ready_time || null,
-        isPeakHour: d.is_peak_hour || false,
-        depositRequired: d.deposit_required || false,
-        depositAmount: d.deposit_amount || 0,
-        kitchenLoad: (d.kitchen_load as "normal" | "busy" | "high") || "normal",
-        name: d.name,
-        phone: d.phone,
-        customerEmail: d.customer_email || undefined,
-        notes: d.notes || undefined,
-        dietary: d.dietary || [],
-        occasion: d.occasion || undefined,
-        accessibility: d.accessibility || [],
-        windowPriority: d.window_priority || false,
-        items: (d.items as OrderItem[]) || [],
-        total: d.total || 0,
-        paymentMethod: (d.payment_method as "pay_on_arrival" | "upi_prepay") || "pay_on_arrival",
-        paymentStatus: (d.payment_status as "pending_cash" | "pending_qr" | "paid") || "pending_cash",
-        paymentReference: d.payment_reference || undefined,
-        userId: d.user_id || undefined,
-        ...mapOrderTypeFields(d),
-        status: (d.status as BookingStatus) || "confirmed",
-      }));
+      return data.map((d) => withKitchenState(mapBookingRow(d)));
     }
   }
 
   try {
     const existing: BookingInput[] = JSON.parse(localStorage.getItem("cafeq_bookings") || "[]");
-    return [...existing].reverse();
+    return [...existing].reverse().map(withKitchenState);
   } catch {
     return [];
   }
 }
 
 // ----------------- Kitchen Specific Order Controls -----------------
+// Every item moves on its own (PENDING → PREPARING → READY → SERVED, or CANCELLED);
+// the ticket's kitchen status is derived from its items after every change.
 
+export type ItemUpdateResult = {
+  success: boolean;
+  error?: string;
+  /** Another station changed the item first; `booking` holds the latest state. */
+  conflict?: boolean;
+  booking?: BookingInput;
+};
+
+type KitchenActor = "customer" | "admin" | "kitchen";
+
+/** Fetches one booking with normalized item statuses. */
+async function getKitchenBooking(code: string): Promise<BookingInput | null> {
+  const supabase = getPublicClient();
+  if (supabase) {
+    const { data } = await supabase.from("bookings").select("*").eq("code", code).maybeSingle();
+    if (data) return withKitchenState(mapBookingRow(data));
+  }
+  const local = safeGetBookings().find((b) => b.code === code);
+  return local ? withKitchenState(local) : null;
+}
+
+/** Applies a derived ticket status and its timestamps to a booking. */
+function applyTicketState(
+  b: BookingInput,
+  items: OrderItem[],
+  nowIso: string,
+  reason?: string,
+  actor?: KitchenActor
+): BookingInput {
+  const kitchenStatus = deriveTicketStatus(items);
+  return {
+    ...b,
+    items,
+    kitchenStatus,
+    status: kitchenStatus === "completed" ? "completed" : kitchenStatus === "cancelled" ? "cancelled" : b.status,
+    acceptedAt: kitchenStatus !== "new" ? b.acceptedAt || nowIso : b.acceptedAt,
+    readyAt: kitchenStatus === "ready" ? b.readyAt || nowIso : b.readyAt,
+    completedAt: kitchenStatus === "completed" ? b.completedAt || nowIso : b.completedAt,
+    cancellationReason: kitchenStatus === "cancelled" ? reason || b.cancellationReason : b.cancellationReason,
+    cancelledBy: kitchenStatus === "cancelled" ? actor || b.cancelledBy : b.cancelledBy,
+  };
+}
+
+/** Translates kds_set_item_status errors (see the per-item migration) into results. */
+async function rpcErrorToResult(code: string, error: { code?: string; message: string }): Promise<ItemUpdateResult> {
+  const msg = error.message || "";
+  if (msg.startsWith("ITEM_CONFLICT")) {
+    return {
+      success: false,
+      conflict: true,
+      error: "Another station already updated this item. The board has been refreshed.",
+      booking: (await getKitchenBooking(code)) ?? undefined,
+    };
+  }
+  if (msg.startsWith("INVALID_TRANSITION")) return { success: false, error: "That status change isn't allowed for this item." };
+  if (msg.startsWith("ORDER_CANCELLED")) return { success: false, error: "This order has been cancelled." };
+  if (msg.startsWith("ORDER_NOT_FOUND") || msg.startsWith("ITEM_NOT_FOUND")) {
+    return { success: false, error: "Order or item not found." };
+  }
+  if (error.code === "PGRST202") {
+    return { success: false, error: "Kitchen database is out of date — run the latest Supabase migrations." };
+  }
+  console.error("kds_set_item_status error:", error);
+  return { success: false, error: "Could not update the item. Please try again." };
+}
+
+/**
+ * Moves one or more items of a ticket to `status`.
+ * - Only single-step forward moves (or cancelling an unfinished item) are allowed.
+ * - Items already at `status` are left alone, so a double tap or two stations
+ *   pressing the same button at once is harmless.
+ * - With `expectedStatus`, the move is rejected as a conflict if another station
+ *   moved the item somewhere else first.
+ */
+export async function setOrderItemsStatus({
+  code,
+  itemIds,
+  status,
+  expectedStatus,
+  reason,
+  actor = "kitchen",
+}: {
+  code: string;
+  itemIds: string[];
+  status: ItemStatus;
+  expectedStatus?: ItemStatus;
+  reason?: string;
+  actor?: KitchenActor;
+}): Promise<ItemUpdateResult> {
+  if (!getKitchenSession()) {
+    return { success: false, error: "Access denied. Please sign in as kitchen staff." };
+  }
+  if (itemIds.length === 0) return { success: false, error: "No items selected." };
+
+  const nowIso = new Date().toISOString();
+  const before = await getKitchenBooking(code);
+  if (!before) return { success: false, error: "Order or item not found." };
+  let updated: BookingInput;
+
+  const supabase = getPublicClient();
+  if (supabase) {
+    const { data, error } = await supabase.rpc("kds_set_item_status", {
+      _code: code,
+      _item_ids: itemIds,
+      _next: status,
+      _expected: expectedStatus ?? null,
+      _reason: reason ?? null,
+      _actor: actor,
+    });
+    if (error || !data) return rpcErrorToResult(code, error ?? { message: "" });
+    updated = withKitchenState(mapBookingRow(data as BookingRow));
+  } else {
+    if (before.status === "cancelled" && status !== "CANCELLED") {
+      return { success: false, error: "This order has been cancelled." };
+    }
+    for (const id of itemIds) {
+      const item = before.items.find((i) => i.id === id);
+      if (!item) return { success: false, error: "Order or item not found." };
+      if (expectedStatus && item.status !== status && item.status !== expectedStatus) {
+        return {
+          success: false,
+          conflict: true,
+          error: "Another station already updated this item. The board has been refreshed.",
+          booking: before,
+        };
+      }
+    }
+    try {
+      updated = applyTicketState(before, applyItemTransition(before.items, itemIds, status, nowIso), nowIso, reason, actor);
+    } catch (err) {
+      if (err instanceof ItemTransitionError) {
+        return { success: false, error: "That status change isn't allowed for this item." };
+      }
+      throw err;
+    }
+    safeSaveBookings(safeGetBookings().map((b) => (b.code === code ? updated : b)));
+  }
+
+  emitKitchenEvent("ITEM_STATUS_CHANGED", { code, itemIds, status, booking: updated });
+  notifyTicketTransition(before.kitchenStatus, updated);
+  return { success: true, booking: updated };
+}
+
+/** Moves a single item (orderId = booking code). */
+export async function updateOrderItemStatus({
+  code,
+  itemId,
+  status,
+  expectedStatus,
+}: {
+  code: string;
+  itemId: string;
+  status: ItemStatus;
+  expectedStatus?: ItemStatus;
+}): Promise<ItemUpdateResult> {
+  return setOrderItemsStatus({ code, itemIds: [itemId], status, expectedStatus });
+}
+
+/** Customer notifications when the derived ticket status advances. */
+function notifyTicketTransition(previous: KitchenStatus | undefined, booking: BookingInput) {
+  const next = booking.kitchenStatus;
+  if (next === previous) return;
+  if (previous === "new" && next !== "cancelled") {
+    dispatchNotification("order_accepted", {
+      bookingCode: booking.code,
+      customerName: booking.name,
+      customerPhone: booking.phone,
+      customerEmail: booking.customerEmail || undefined,
+      foodReadyTime: booking.foodReadyTime || undefined,
+    }).catch((err) => console.warn("Order accepted notification error:", err));
+  }
+  if (next === "ready") {
+    dispatchNotification("order_ready", {
+      bookingCode: booking.code,
+      customerName: booking.name,
+      customerPhone: booking.phone,
+      customerEmail: booking.customerEmail || undefined,
+      tableType: booking.tableNumber ? `Table ${booking.tableNumber}` : booking.tableType || "your table",
+    }).catch((err) => console.warn("Order ready notification error:", err));
+  }
+}
+
+const ITEM_TARGET_FOR_TICKET: Partial<Record<KitchenStatus, ItemStatus>> = {
+  preparing: "PREPARING",
+  ready: "READY",
+  completed: "SERVED",
+};
+
+/**
+ * Ticket-level action, built on item transitions:
+ * - "cancelled" cancels every unfinished item (the existing ticket reject).
+ * - "preparing" / "ready" / "completed" advance every live item up to that stage
+ *   (Start All / Serve All).
+ */
 export async function updateKitchenOrderStatus({
   code,
   status,
@@ -912,135 +1145,33 @@ export async function updateKitchenOrderStatus({
   code: string;
   status: KitchenStatus;
   reason?: string;
-  cancelledBy?: "customer" | "admin" | "kitchen";
+  cancelledBy?: KitchenActor;
 }): Promise<{ success: boolean; error?: string }> {
-  const now = new Date().toISOString();
+  let booking = await getKitchenBooking(code);
+  if (!booking) return { success: false, error: "Order not found." };
 
-  // If status is completed or cancelled, sync overall booking status as well
-  const overallBookingStatus: BookingStatus =
-    status === "completed" ? "completed" : status === "cancelled" ? "cancelled" : "confirmed";
+  if (status === "cancelled") {
+    const ids = booking.items.filter((i) => i.status !== "SERVED" && i.status !== "CANCELLED").map((i) => i.id);
+    if (ids.length === 0) return { success: false, error: "Every item has already been served." };
+    const res = await setOrderItemsStatus({ code, itemIds: ids, status: "CANCELLED", reason, actor: cancelledBy || "kitchen" });
+    if (res.success) emitKitchenEvent("ORDER_REJECTED", { code, reason, booking: res.booking });
+    return { success: res.success, error: res.error };
+  }
 
-  const supabase = getPublicClient();
-  if (supabase) {
-    try {
-      const updatePayload: Record<string, any> = {
-        status: overallBookingStatus,
-      };
-      if (status === "preparing") updatePayload["accepted_at"] = now;
-      if (status === "ready") updatePayload["food_ready_time"] = now;
-      if (status === "completed") updatePayload["completed_at"] = now;
-      if (reason) updatePayload["notes"] = reason;
+  const target = ITEM_TARGET_FOR_TICKET[status];
+  if (!target) return { success: false, error: "Tickets cannot be moved back to New." };
 
-      await supabase.from("bookings").update(updatePayload).eq("code", code);
-    } catch (err) {
-      console.warn("Supabase kitchen status update note:", err);
+  // Step each live item forward one stage at a time until it reaches the target
+  for (const stage of ["PREPARING", "READY", "SERVED"] as const) {
+    const ids = booking.items.filter((i) => getNextItemStatus(i.status) === stage).map((i) => i.id);
+    if (ids.length > 0) {
+      const res = await setOrderItemsStatus({ code, itemIds: ids, status: stage });
+      if (!res.success || !res.booking) return { success: false, error: res.error };
+      booking = res.booking;
     }
+    if (stage === target) break;
   }
-
-  try {
-    const existing: BookingInput[] = JSON.parse(localStorage.getItem("cafeq_bookings") || "[]");
-    let updatedBooking: BookingInput | null = null;
-
-    const updated = existing.map((b) => {
-      if (b.code === code) {
-        const itemStatus = status === "completed" || status === "ready" ? "done" : b.items?.every(i => i.status === "done") ? "done" : "pending";
-        const newItems = b.items?.map(i => ({
-          ...i,
-          status: status === "completed" ? "done" as const : i.status || "pending",
-        })) || [];
-
-        updatedBooking = {
-          ...b,
-          kitchenStatus: status,
-          status: overallBookingStatus,
-          acceptedAt: status === "preparing" ? now : b.acceptedAt,
-          readyAt: status === "ready" ? now : b.readyAt,
-          completedAt: status === "completed" ? now : b.completedAt,
-          cancellationReason: reason || b.cancellationReason,
-          cancelledBy: cancelledBy || b.cancelledBy,
-          items: newItems,
-        };
-        return updatedBooking;
-      }
-      return b;
-    });
-
-    localStorage.setItem("cafeq_bookings", JSON.stringify(updated));
-
-    // Emit event to KDS, customer order tracking, and admin dashboard
-    emitKitchenEvent("ORDER_STATUS_CHANGED", { code, status, reason, booking: updatedBooking });
-
-    // Multi-channel lifecycle notifications (SMS, Email, WhatsApp)
-    if (updatedBooking) {
-      if (status === "preparing") {
-        dispatchNotification("order_accepted", {
-          bookingCode: code,
-          customerName: updatedBooking.name,
-          customerPhone: updatedBooking.phone,
-          customerEmail: updatedBooking.customerEmail,
-          foodReadyTime: updatedBooking.foodReadyTime || undefined,
-        }).catch((err) => console.warn("Order accepted notification error:", err));
-      } else if (status === "ready") {
-        dispatchNotification("order_ready", {
-          bookingCode: code,
-          customerName: updatedBooking.name,
-          customerPhone: updatedBooking.phone,
-          customerEmail: updatedBooking.customerEmail,
-          tableType: updatedBooking.seating ? `Table ${updatedBooking.seating}` : updatedBooking.tableType || "your table",
-        }).catch((err) => console.warn("Order ready notification error:", err));
-      }
-    }
-
-    return { success: true };
-  } catch (err) {
-    console.error("Failed to update kitchen order status in localStorage:", err);
-    return { success: false, error: "Failed to update order status." };
-  }
-}
-
-export async function updateOrderItemStatus({
-  code,
-  itemId,
-  status,
-}: {
-  code: string;
-  itemId: string;
-  status: "pending" | "done";
-}): Promise<{ success: boolean }> {
-  try {
-    const existing: BookingInput[] = JSON.parse(localStorage.getItem("cafeq_bookings") || "[]");
-    let updatedBooking: BookingInput | null = null;
-
-    const updated = existing.map((b) => {
-      if (b.code === code) {
-        const items = b.items?.map((item) => {
-          if (item.id === itemId) {
-            return { ...item, status };
-          }
-          return item;
-        }) || [];
-
-        // If all items are done, can advance kitchenStatus to ready
-        const allDone = items.length > 0 && items.every((i) => i.status === "done");
-        const nextKitchenStatus = allDone && b.kitchenStatus === "preparing" ? "ready" : b.kitchenStatus;
-
-        updatedBooking = {
-          ...b,
-          items,
-          kitchenStatus: nextKitchenStatus,
-          readyAt: nextKitchenStatus === "ready" && !b.readyAt ? new Date().toISOString() : b.readyAt,
-        };
-        return updatedBooking;
-      }
-      return b;
-    });
-
-    localStorage.setItem("cafeq_bookings", JSON.stringify(updated));
-    emitKitchenEvent("ITEM_STATUS_CHANGED", { code, itemId, status, booking: updatedBooking });
-    return { success: true };
-  } catch {
-    return { success: false };
-  }
+  return { success: true };
 }
 
 /**
