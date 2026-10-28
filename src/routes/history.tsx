@@ -16,6 +16,11 @@ import {
   FileText,
   Check,
   CreditCard,
+  Utensils,
+  ShoppingBag,
+  Bike,
+  MapPin,
+  Package,
 } from "lucide-react";
 import { toast } from "sonner";
 import { useAuth } from "@/context/AuthContext";
@@ -25,6 +30,10 @@ import {
   downloadReceiptPdf,
   generateReceiptNumber,
 } from "@/lib/receipt.service";
+import {
+  getOrderTypeDetails,
+  getOrderStatusLabel,
+} from "@/lib/order-types";
 import {
   getUserNotificationPreferences,
   updateUserNotificationPreferences,
@@ -131,7 +140,7 @@ function HistoryPage() {
           time: b.time,
           customerName: b.name,
           customerPhone: b.phone,
-          customerEmail: b.customerEmail,
+          customerEmail: b.customerEmail || undefined,
           tableType: b.tableType || "Reserved Table",
           partySize: b.party,
           items: b.items || [],
@@ -145,8 +154,10 @@ function HistoryPage() {
         };
       }
 
-      downloadReceiptPdf(receipt);
-      toast.success(`Downloaded digital receipt for ${b.code}`);
+      if (receipt) {
+        downloadReceiptPdf(receipt);
+        toast.success(`Downloaded digital receipt for ${b.code}`);
+      }
     } catch (err) {
       toast.error("Could not generate receipt PDF.");
     } finally {
@@ -424,6 +435,8 @@ function HistoryPage() {
         ) : (
           displayedBookings.map((b) => {
             const tableInfo = tableTypes.find((t) => t.id === b.tableType);
+            const typeDetails = getOrderTypeDetails(b.orderType);
+            const statusFlowLabel = getOrderStatusLabel(b.orderType, b.status, b.kitchenStatus);
             const preOrdered = b.items?.filter((i) => i.fulfillment === "pre_ordered") || [];
             const atTable = b.items?.filter((i) => i.fulfillment === "at_table") || [];
             const isCancelled = b.status === "cancelled";
@@ -442,9 +455,26 @@ function HistoryPage() {
                   <div>
                     <div className="flex flex-wrap items-center gap-2.5">
                       <span className="font-display font-bold text-xl text-foreground">{b.code}</span>
-                      <Badge variant="secondary" className="text-xs">
-                        {tableInfo?.name || b.seating}
+
+                      {/* Order Type Badge */}
+                      <Badge className={`text-xs font-semibold flex items-center gap-1.5 shadow-xs ${typeDetails.badgeClass}`}>
+                        {typeDetails.type === "DINE_IN" && <Utensils className="size-3" />}
+                        {typeDetails.type === "TAKEAWAY" && <ShoppingBag className="size-3" />}
+                        {typeDetails.type === "DELIVERY" && <Bike className="size-3" />}
+                        {typeDetails.label}
                       </Badge>
+
+                      {/* Status Flow Label */}
+                      <Badge variant="outline" className="text-xs font-medium text-foreground border-border bg-secondary/60">
+                        {statusFlowLabel}
+                      </Badge>
+
+                      {typeDetails.type === "DINE_IN" && (
+                        <Badge variant="secondary" className="text-xs">
+                          {tableInfo?.name || b.seating}
+                        </Badge>
+                      )}
+
                       {isCancelled ? (
                         <Badge variant="destructive" className="text-xs">
                           Cancelled
@@ -460,12 +490,35 @@ function HistoryPage() {
                         </Badge>
                       )}
                     </div>
-                    <p className="mt-2 text-xs sm:text-sm text-muted-foreground flex items-center gap-2">
-                      <CalendarCheck className="size-4 text-accent" />
-                      <span className="font-medium text-foreground">{b.date}</span> at{" "}
-                      <span className="font-medium text-foreground">{b.time}</span> · {b.party}{" "}
-                      {b.party === 1 ? "Guest" : "Guests"}
-                    </p>
+
+                    <div className="mt-2 text-xs sm:text-sm text-muted-foreground space-y-1">
+                      <p className="flex items-center gap-2">
+                        <CalendarCheck className="size-4 text-accent" />
+                        <span className="font-medium text-foreground">{b.date}</span> at{" "}
+                        <span className="font-medium text-foreground">{b.time}</span>
+                        {typeDetails.type === "DINE_IN" && (
+                          <span> · {b.party} {b.party === 1 ? "Guest" : "Guests"}</span>
+                        )}
+                      </p>
+
+                      {typeDetails.type === "DINE_IN" && b.tableNumber && (
+                        <p className="text-xs text-foreground font-medium flex items-center gap-1.5">
+                          <Utensils className="size-3.5 text-accent" /> Table #{b.tableNumber}
+                        </p>
+                      )}
+
+                      {typeDetails.type === "TAKEAWAY" && (
+                        <p className="text-xs text-foreground font-medium flex items-center gap-1.5">
+                          <Package className="size-3.5 text-accent" /> Pickup: {b.pickupTime || "ASAP"} (Counter Collection)
+                        </p>
+                      )}
+
+                      {typeDetails.type === "DELIVERY" && b.deliveryAddress && (
+                        <p className="text-xs text-foreground font-medium flex items-center gap-1.5">
+                          <MapPin className="size-3.5 text-accent" /> Deliver to: {b.deliveryAddress}
+                        </p>
+                      )}
+                    </div>
                   </div>
 
                   {/* Actions */}

@@ -23,6 +23,10 @@ import {
   Download,
   FileText,
   Banknote,
+  ShoppingBag,
+  Bike,
+  MapPin,
+  Package,
 } from "lucide-react";
 import { toast } from "sonner";
 import { useQuery } from "@tanstack/react-query";
@@ -37,6 +41,16 @@ import {
   isCocktailsCategoryHidden,
   subscribeToMenuUpdates,
 } from "@/lib/menu";
+import {
+  normalizeOrderType,
+  getOrderTypeDetails,
+  getOrderTypePipelineSteps,
+  getOrderCharges,
+  validateOrderDetails,
+  formatDeliveryAddress,
+  type OrderType,
+  type OrderFieldErrors,
+} from "@/lib/order-types";
 
 const categories = categoriesRaw ?? [];
 const menu = menuRaw ?? [];
@@ -70,9 +84,17 @@ import {
 import { PageBackground } from "@/components/PageBackground";
 
 export const Route = createFileRoute("/reserve")({
-  validateSearch: (search: Record<string, unknown>): { phone?: string; rebook?: string } => ({
+  // `table` comes from the on-table QR code (e.g. /reserve?table=T-04); aliases kept for older printed codes
+  validateSearch: (search: Record<string, unknown>): {
+    phone?: string;
+    rebook?: string;
+    table?: string;
+    orderType?: string;
+  } => ({
     phone: (search["phone"] as string) || undefined,
     rebook: (search["rebook"] as string) || undefined,
+    table: String(search["table"] ?? search["tableNumber"] ?? search["tableno"] ?? "").trim() || undefined,
+    orderType: (search["orderType"] as string) || undefined,
   }),
   loader: async ({ context }) => {
     try {
@@ -147,15 +169,31 @@ type CartItemState = {
 function ReservePage() {
   const { data: settingsData } = useQuery({
     ...settingsQueryOptions,
-    initialData: { upiId: "cafeq@upi", upiPayeeName: "The CAFEQ" },
+    initialData: { upiId: "cafeq@upi", upiPayeeName: "The CAFEQ", deliveryFee: 40, packagingCharge: 0 },
   });
   const settings = settingsData ?? {
     upiId: "cafeq@upi",
     upiPayeeName: "The CAFEQ",
+    deliveryFee: 40,
+    packagingCharge: 0,
   };
   const search = Route.useSearch();
   const navigate = useNavigate();
   const { user, isAuthenticated, isLoading: authLoading } = useAuth();
+
+  // A table from the QR code implies Dine-in, regardless of any orderType param
+  const initialTable = search.table || "";
+  const [orderType, setOrderType] = useState<OrderType>(() =>
+    initialTable ? "DINE_IN" : normalizeOrderType(search.orderType)
+  );
+  const [tableNumber, setTableNumber] = useState(initialTable);
+  const [tableFromQr, setTableFromQr] = useState(Boolean(initialTable));
+  const [pickupTime, setPickupTime] = useState<string>("ASAP (~15-20 mins)");
+  const [deliveryStreet, setDeliveryStreet] = useState<string>("");
+  const [deliveryLandmark, setDeliveryLandmark] = useState<string>("");
+  const [deliveryPincode, setDeliveryPincode] = useState<string>("");
+  const [deliveryInstructions, setDeliveryInstructions] = useState<string>("");
+  const [fieldErrors, setFieldErrors] = useState<OrderFieldErrors>({});
 
   const [date, setDate] = useState(today());
   const [time, setTime] = useState("09:00");
@@ -170,6 +208,40 @@ function ReservePage() {
   const [occasion, setOccasion] = useState("");
   const [accessibility, setAccessibility] = useState<string[]>([]);
   const [windowPriority, setWindowPriority] = useState(false);
+
+  // Switching order type clears irrelevant fields
+  const handleOrderTypeChange = (newType: OrderType) => {
+    setOrderType(newType);
+    setFieldErrors({});
+
+    if (newType !== "DINE_IN") {
+      setTableNumber("");
+      setTableFromQr(false);
+    } else {
+      if (initialTable) {
+        setTableNumber(initialTable);
+        setTableFromQr(true);
+      }
+    }
+
+    if (newType !== "TAKEAWAY") {
+      setPickupTime("");
+    } else {
+      setPickupTime("ASAP (~15-20 mins)");
+    }
+
+    if (newType !== "DELIVERY") {
+      setDeliveryStreet("");
+      setDeliveryLandmark("");
+      setDeliveryPincode("");
+      setDeliveryInstructions("");
+    }
+
+    // Takeaway & Delivery always require food ordering
+    if (newType !== "DINE_IN") {
+      setWantFoodOnArrival(true);
+    }
+  };
 
   // Require login to reserve
   useEffect(() => {
@@ -388,6 +460,8 @@ function ReservePage() {
           prepTimeMinutes: menuItem.prepTimeMinutes,
           fulfillment: state.fulfillment,
           category: menuItem.category,
+          status: "pending" as const,
+          isVeg: menuItem.isVeg,
           image: menuItem.image || "/uploads/menu/placeholder.webp",
         };
       });
@@ -403,7 +477,9 @@ function ReservePage() {
   }, [items, menuItems, outOfStockIds]);
 
   const foodTotal = items.reduce((sum, i) => sum + i.price * i.qty, 0);
-  const totalWithDeposit = foodTotal + (slotEvaluation.depositRequired ? slotEvaluation.depositAmount : 0);
+  const { deliveryFee, packagingCharge } = getOrderCharges(orderType, settings);
+  const depositAmount = orderType === "DINE_IN" && slotEvaluation.depositRequired ? slotEvaluation.depositAmount : 0;
+  const totalWithDeposit = foodTotal + deliveryFee + packagingCharge + depositAmount;
 
   const readyTimeEstimate = useMemo(() => {
     if (preOrderedItems.length === 0) return null;
@@ -493,10 +569,23 @@ function ReservePage() {
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name.trim() || !phone.trim()) {
-      toast.error("Add your name and phone number so we can hold your table.");
+
+    // 1. Validate required fields per Order Type (same rules createBooking enforces)
+    const errors = validateOrderDetails({
+      orderType,
+      customerName: name,
+      customerPhone: phone,
+      tableNumber,
+      itemCount: items.length,
+      ...(orderType === "DELIVERY" && { deliveryStreet, deliveryPincode }),
+    });
+
+    if (Object.keys(errors).length > 0) {
+      setFieldErrors(errors);
+      toast.error(Object.values(errors)[0]);
       return;
     }
+    setFieldErrors({});
 
     // Client-side guard: verify no out-of-stock items in pre-order
     const outOfStockInCart = items.filter((it) => {
@@ -505,7 +594,7 @@ function ReservePage() {
     });
     if (outOfStockInCart.length > 0) {
       const names = outOfStockInCart.map((i) => i.name).join(", ");
-      toast.error(`Cannot reserve: "${names}" is out of stock. Please remove it from your pre-order.`);
+      toast.error(`Cannot proceed: "${names}" is out of stock. Please remove it from your order.`);
       return;
     }
 
@@ -522,17 +611,27 @@ function ReservePage() {
       await createBooking({
         data: {
           code: bookingCode,
+          orderType,
+          tableNumber: orderType === "DINE_IN" ? tableNumber.trim() : null,
+          customerName: name.trim(),
+          customerPhone: phone.trim(),
+          deliveryAddress:
+            orderType === "DELIVERY" ? formatDeliveryAddress(deliveryStreet, deliveryLandmark, deliveryPincode) : null,
+          deliveryInstructions: orderType === "DELIVERY" ? deliveryInstructions.trim() || null : null,
+          pickupTime: orderType === "TAKEAWAY" ? pickupTime.trim() || null : null,
+          deliveryFee,
+          packagingCharge,
           date,
-          time,
-          party,
-          seating: tableTypes.find((t) => t.id === selectedTableType)?.name || selectedTableType,
-          tableType: selectedTableType,
-          hasPreorder: wantFoodOnArrival && items.length > 0,
+          time: orderType === "DINE_IN" ? time : (orderType === "TAKEAWAY" ? (pickupTime.trim() || "ASAP") : "Standard Delivery"),
+          party: orderType === "DINE_IN" ? party : 1,
+          seating: orderType === "DINE_IN" ? (tableTypes.find((t) => t.id === selectedTableType)?.name || selectedTableType) : `Order: ${orderType}`,
+          tableType: orderType === "DINE_IN" ? selectedTableType : "standard",
+          hasPreorder: items.length > 0,
           estimatedPrepTime: readyTimeEstimate ? readyTimeEstimate.prepMinutes : 0,
           foodReadyTime: readyTimeEstimate ? readyTimeEstimate.readyTimeStr : null,
-          isPeakHour: slotEvaluation.isPeakHour,
-          depositRequired: slotEvaluation.depositRequired,
-          depositAmount: slotEvaluation.depositAmount,
+          isPeakHour: orderType === "DINE_IN" ? slotEvaluation.isPeakHour : false,
+          depositRequired: orderType === "DINE_IN" ? slotEvaluation.depositRequired : false,
+          depositAmount: depositAmount,
           kitchenLoad: slotEvaluation.kitchenLoad,
           name: name.trim(),
           phone: phone.trim(),
@@ -548,6 +647,7 @@ function ReservePage() {
           paymentStatus: initialPaymentStatus,
           userId: user?.id || null,
           status: "confirmed",
+          kitchenStatus: "new" as const,
         },
       });
 
@@ -557,10 +657,10 @@ function ReservePage() {
           phone: phone.trim(),
           date,
           time,
-          tableType: tableTypes.find((t) => t.id === selectedTableType)?.name || selectedTableType,
-          partySize: party,
+          tableType: orderType === "DINE_IN" ? (tableTypes.find((t) => t.id === selectedTableType)?.name || selectedTableType) : `Order (${orderType})`,
+          partySize: orderType === "DINE_IN" ? party : 1,
           bookingCode,
-          preOrdered: wantFoodOnArrival && items.length > 0,
+          preOrdered: items.length > 0,
           totalAmount: totalWithDeposit,
         });
       } catch (err) {
@@ -569,7 +669,13 @@ function ReservePage() {
 
       setCode(bookingCode);
       setQrPaymentStatus("pending");
-      toast.success("Table reserved & booking recorded!");
+      const successMsg =
+        orderType === "DINE_IN"
+          ? "Table reserved & order placed!"
+          : orderType === "TAKEAWAY"
+          ? "Takeaway order placed! We'll start prepping your food."
+          : "Delivery order placed! Kitchen dispatch queued.";
+      toast.success(successMsg);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Something went wrong. Please try again.");
     } finally {
@@ -657,22 +763,117 @@ function ReservePage() {
   }, [settings, totalWithDeposit, code]);
 
   if (code) {
+    const typeDetails = getOrderTypeDetails(orderType);
+    const pipelineSteps = getOrderTypePipelineSteps(orderType);
+
     return (
       <>
         <PageBackground imageUrl="https://images.unsplash.com/photo-1559525839-b184a4d698c7?q=80&w=2000&auto=format&fit=crop" />
         <div className="mx-auto max-w-xl px-5 py-20 text-center relative z-10 bg-background/80 backdrop-blur-md rounded-3xl mt-12 border border-border/50">
           <div className="mx-auto flex size-14 items-center justify-center rounded-full bg-accent text-accent-foreground shadow-lg">
-          <Check className="size-7" aria-hidden="true" />
-        </div>
-        <h1 className="mt-6 text-3xl sm:text-4xl font-display">You're Booked, {name.split(" ")[0]}!</h1>
-        <p className="mt-2 text-muted-foreground text-sm">
-          {party} {party === 1 ? "Guest" : "Guests"} · {tableTypes.find((t) => t.id === selectedTableType)?.name} · {date} at {time}
-        </p>
+            <Check className="size-7" aria-hidden="true" />
+          </div>
 
-        <div className="mt-6 inline-block rounded-xl bg-secondary/70 border border-border px-6 py-3">
-          <p className="eyebrow text-[11px]">Booking Order Code</p>
-          <p className="mt-1 font-display text-3xl tracking-widest text-foreground font-bold">{code}</p>
-        </div>
+          {/* Order Type Badge */}
+          <div className="mt-4 flex justify-center">
+            <Badge className={`px-3 py-1 text-xs font-semibold flex items-center gap-1.5 shadow-xs ${typeDetails.badgeClass}`}>
+              {typeDetails.type === "DINE_IN" && <Utensils className="size-3.5" />}
+              {typeDetails.type === "TAKEAWAY" && <ShoppingBag className="size-3.5" />}
+              {typeDetails.type === "DELIVERY" && <Bike className="size-3.5" />}
+              {typeDetails.label}
+            </Badge>
+          </div>
+
+          <h1 className="mt-3 text-3xl sm:text-4xl font-display">
+            {orderType === "DINE_IN" ? `You're Booked, ${name.split(" ")[0]}!` : `Order Placed, ${name.split(" ")[0]}!`}
+          </h1>
+          <p className="mt-2 text-muted-foreground text-sm">
+            {orderType === "DINE_IN" && (
+              <>{tableNumber ? `Table ${tableNumber} · ` : ""}{party} {party === 1 ? "Guest" : "Guests"} · {tableTypes.find((t) => t.id === selectedTableType)?.name} · {date} at {time}</>
+            )}
+            {orderType === "TAKEAWAY" && (
+              <>Takeaway Pickup: {pickupTime || "ASAP (~15-20 mins)"} · Collect at Counter</>
+            )}
+            {orderType === "DELIVERY" && (
+              <>Delivery to: {deliveryStreet}{deliveryPincode ? ` (${deliveryPincode})` : ""}</>
+            )}
+          </p>
+
+          {/* Status Flow Pipeline Tracker */}
+          <div className="mt-6 rounded-2xl border border-border/80 bg-card p-4 text-left shadow-xs">
+            <p className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider mb-3">
+              Order Status Flow ({typeDetails.label})
+            </p>
+            <div className="flex items-center justify-between relative">
+              {pipelineSteps.map((step, idx) => {
+                const isCurrent = idx === 0;
+                return (
+                  <div key={step} className="flex-1 flex flex-col items-center text-center relative z-10">
+                    <div
+                      className={`size-8 rounded-full flex items-center justify-center text-xs font-bold transition-all ${
+                        isCurrent
+                          ? "bg-accent text-accent-foreground ring-4 ring-accent/20"
+                          : "bg-muted text-muted-foreground"
+                      }`}
+                    >
+                      {idx + 1}
+                    </div>
+                    <span
+                      className={`text-[11px] mt-1.5 font-medium ${
+                        isCurrent ? "text-foreground font-semibold" : "text-muted-foreground"
+                      }`}
+                    >
+                      {step}
+                    </span>
+                  </div>
+                );
+              })}
+              <div className="absolute top-4 left-6 right-6 h-0.5 bg-border -z-0" />
+            </div>
+          </div>
+
+          {/* Type-Specific Details Card */}
+          {orderType === "DINE_IN" && tableNumber && (
+            <div className="mt-4 rounded-xl border border-accent/30 bg-accent/10 p-3 text-xs text-left flex items-center justify-between">
+              <span className="text-muted-foreground">Assigned Table:</span>
+              <span className="font-bold text-foreground text-sm">Table #{tableNumber}</span>
+            </div>
+          )}
+          {orderType === "TAKEAWAY" && (
+            <div className="mt-4 rounded-xl border border-accent/30 bg-accent/10 p-3.5 text-xs text-left space-y-1">
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">Estimated Pickup:</span>
+                <span className="font-bold text-foreground">{pickupTime || "ASAP (~15-20 mins)"}</span>
+              </div>
+              <p className="text-[11px] text-muted-foreground">
+                Please present your booking code <strong>{code}</strong> at the front counter when you arrive.
+              </p>
+            </div>
+          )}
+          {orderType === "DELIVERY" && (
+            <div className="mt-4 rounded-xl border border-accent/30 bg-accent/10 p-3.5 text-xs text-left space-y-1">
+              <div className="flex justify-between items-start">
+                <span className="text-muted-foreground">Delivery Destination:</span>
+                <span className="font-semibold text-foreground text-right max-w-[65%]">
+                  {deliveryStreet}{deliveryLandmark ? `, ${deliveryLandmark}` : ""}{deliveryPincode ? ` - ${deliveryPincode}` : ""}
+                </span>
+              </div>
+              {deliveryInstructions && (
+                <p className="text-[11px] text-muted-foreground pt-1 border-t border-border/40">
+                  <strong>Instructions:</strong> {deliveryInstructions}
+                </p>
+              )}
+              <div className="flex justify-between pt-1 border-t border-border/40 text-[11px]">
+                <span className="text-muted-foreground">Contact:</span>
+                <span className="font-medium text-foreground">{phone}</span>
+              </div>
+            </div>
+          )}
+
+          <div className="mt-6 inline-block rounded-xl bg-secondary/70 border border-border px-6 py-3">
+            <p className="eyebrow text-[11px]">Booking Order Code</p>
+            <p className="mt-1 font-display text-3xl tracking-widest text-foreground font-bold">{code}</p>
+          </div>
 
         {/* Payment Confirmation Component: Razorpay vs QR Code vs Cash on Arrival */}
         {paymentMethod === "online_razorpay" ? (
@@ -812,14 +1013,24 @@ function ReservePage() {
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <Banknote className="size-5 text-accent" />
-                <h3 className="font-semibold text-base text-foreground">Cash on Arrival</h3>
+                <h3 className="font-semibold text-base text-foreground">
+                  {orderType === "DELIVERY" ? "Cash on Delivery" : "Cash on Arrival"}
+                </h3>
               </div>
               <Badge variant="secondary" className="bg-amber-500/10 text-amber-700 text-xs">
-                Pending Cash at Counter
+                {orderType === "DELIVERY" ? "Pay the Rider" : "Pending Cash at Counter"}
               </Badge>
             </div>
             <p className="text-xs text-muted-foreground leading-relaxed">
-              Your table is reserved and dishes are queued. Settle your bill of <strong>₹{totalWithDeposit}</strong> in cash at the counter when you visit. Staff will confirm payment on arrival.
+              {orderType === "DINE_IN" && (
+                <>Your table is reserved and dishes are queued. Settle your bill of <strong>₹{totalWithDeposit}</strong> in cash at the counter when you visit.</>
+              )}
+              {orderType === "TAKEAWAY" && (
+                <>Your order is queued. Pay <strong>₹{totalWithDeposit}</strong> in cash at the counter when you collect it.</>
+              )}
+              {orderType === "DELIVERY" && (
+                <>Your order is queued. Please keep <strong>₹{totalWithDeposit}</strong> ready to pay the rider on delivery.</>
+              )}
             </p>
           </div>
         )}
@@ -922,143 +1133,556 @@ function ReservePage() {
 
       {/* TWO DISTINCT BLOCKS: Reservation Form Steps & Summary Card */}
       <div className="mt-10 flex flex-col lg:flex-row items-start gap-8">
-        <div className="w-full flex-1 min-w-0 space-y-12">
-          {/* STEP 1: Date, Time & Party */}
-          <section>
-            <div className="flex items-center gap-2">
-              <span className="flex size-7 items-center justify-center rounded-full bg-primary text-xs text-primary-foreground font-bold">
-                1
-              </span>
-              <h2 className="text-xl font-display">Date & Time Slot</h2>
-            </div>
-            <div className="mt-6 grid gap-5 sm:grid-cols-2">
-              <div>
-                <Label htmlFor="date">Reservation Date</Label>
-                <Input
-                  id="date"
-                  type="date"
-                  min={today()}
-                  value={date}
-                  onChange={(e) => setDate(e.target.value)}
-                  className="mt-2"
-                />
+        <div className="w-full flex-1 min-w-0 space-y-10">
+          {/* STEP 1: ORDER TYPE SELECTOR */}
+          <section className="rounded-3xl border border-border/80 bg-card/60 p-6 shadow-xs backdrop-blur-sm">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <div className="flex items-center gap-2">
+                <span className="flex size-7 items-center justify-center rounded-full bg-primary text-xs text-primary-foreground font-bold">
+                  1
+                </span>
+                <h2 className="text-xl font-display">Select Order Type</h2>
               </div>
-              <div>
-                <Label>Party Size</Label>
-                <div className="mt-2 flex flex-wrap gap-2">
-                  {partySizes.map((p) => (
-                    <Button
-                      key={p}
-                      type="button"
-                      size="sm"
-                      variant={party === p ? "default" : "outline"}
-                      onClick={() => setParty(p)}
-                      className="size-9 p-0"
-                    >
-                      {p}
-                    </Button>
-                  ))}
+              <Badge variant="secondary" className="text-xs font-semibold">
+                {orderType === "DINE_IN" ? "Dine-in (Default)" : orderType === "TAKEAWAY" ? "Takeaway Pickup" : "Doorstep Delivery"}
+              </Badge>
+            </div>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Choose how you would like to enjoy your food & beverages. Default is Dine-in.
+            </p>
+
+            {/* Segmented Radio Cards with Icons */}
+            <div role="radiogroup" aria-label="Order type" className="mt-5 grid grid-cols-1 sm:grid-cols-3 gap-3.5">
+              <button
+                type="button"
+                role="radio"
+                aria-checked={orderType === "DINE_IN"}
+                onClick={() => handleOrderTypeChange("DINE_IN")}
+                className={`relative flex items-center sm:flex-col sm:items-start gap-3.5 p-4 rounded-2xl border text-left transition-all cursor-pointer ${
+                  orderType === "DINE_IN"
+                    ? "border-accent bg-accent/15 ring-2 ring-accent shadow-sm"
+                    : "border-border/80 bg-card hover:bg-secondary/40 hover:border-border"
+                }`}
+              >
+                <div className={`size-11 rounded-xl flex items-center justify-center shrink-0 ${
+                  orderType === "DINE_IN" ? "bg-accent text-accent-foreground" : "bg-muted text-muted-foreground"
+                }`}>
+                  <Utensils className="size-5" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-1.5">
+                    <span className="font-semibold text-sm text-foreground">Dine-in</span>
+                    {orderType === "DINE_IN" && (
+                      <CheckCircle2 className="size-4 text-accent" />
+                    )}
+                  </div>
+                  <p className="text-[11px] text-muted-foreground mt-0.5 leading-snug">
+                    Eat at café & table service
+                  </p>
+                </div>
+              </button>
+
+              <button
+                type="button"
+                role="radio"
+                aria-checked={orderType === "TAKEAWAY"}
+                onClick={() => handleOrderTypeChange("TAKEAWAY")}
+                className={`relative flex items-center sm:flex-col sm:items-start gap-3.5 p-4 rounded-2xl border text-left transition-all cursor-pointer ${
+                  orderType === "TAKEAWAY"
+                    ? "border-accent bg-accent/15 ring-2 ring-accent shadow-sm"
+                    : "border-border/80 bg-card hover:bg-secondary/40 hover:border-border"
+                }`}
+              >
+                <div className={`size-11 rounded-xl flex items-center justify-center shrink-0 ${
+                  orderType === "TAKEAWAY" ? "bg-accent text-accent-foreground" : "bg-muted text-muted-foreground"
+                }`}>
+                  <ShoppingBag className="size-5" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-1.5">
+                    <span className="font-semibold text-sm text-foreground">Takeaway</span>
+                    {orderType === "TAKEAWAY" && (
+                      <CheckCircle2 className="size-4 text-accent" />
+                    )}
+                  </div>
+                  <p className="text-[11px] text-muted-foreground mt-0.5 leading-snug">
+                    Self pickup at counter
+                  </p>
+                </div>
+              </button>
+
+              <button
+                type="button"
+                role="radio"
+                aria-checked={orderType === "DELIVERY"}
+                onClick={() => handleOrderTypeChange("DELIVERY")}
+                className={`relative flex items-center sm:flex-col sm:items-start gap-3.5 p-4 rounded-2xl border text-left transition-all cursor-pointer ${
+                  orderType === "DELIVERY"
+                    ? "border-accent bg-accent/15 ring-2 ring-accent shadow-sm"
+                    : "border-border/80 bg-card hover:bg-secondary/40 hover:border-border"
+                }`}
+              >
+                <div className={`size-11 rounded-xl flex items-center justify-center shrink-0 ${
+                  orderType === "DELIVERY" ? "bg-accent text-accent-foreground" : "bg-muted text-muted-foreground"
+                }`}>
+                  <Bike className="size-5" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-1.5">
+                    <span className="font-semibold text-sm text-foreground">Delivery</span>
+                    {orderType === "DELIVERY" && (
+                      <CheckCircle2 className="size-4 text-accent" />
+                    )}
+                  </div>
+                  <p className="text-[11px] text-muted-foreground mt-0.5 leading-snug">
+                    Doorstep hot dispatch
+                  </p>
+                </div>
+              </button>
+            </div>
+
+            {/* DYNAMIC EXTRA FIELDS FOR EACH TYPE */}
+            {orderType === "DINE_IN" && (
+              <div className="mt-5 p-4 sm:p-5 rounded-2xl bg-background/70 border border-border/80 space-y-3">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <Label htmlFor="tableNumber" className="text-xs font-semibold flex items-center gap-1.5">
+                    <Utensils className="size-3.5 text-accent" /> Table Number (Required for Dine-in)
+                  </Label>
+                  {tableFromQr && (
+                    <Badge variant="secondary" className="text-[10px] bg-emerald-500/15 text-emerald-600 border border-emerald-500/30 flex items-center gap-1">
+                      <QrCode className="size-3" /> Auto-filled from Table QR
+                    </Badge>
+                  )}
+                </div>
+                <Input
+                  id="tableNumber"
+                  value={tableNumber}
+                  onChange={(e) => {
+                    setTableNumber(e.target.value);
+                    if (fieldErrors.tableNumber) {
+                      setFieldErrors((prev) => {
+                        const copy = { ...prev };
+                        delete copy.tableNumber;
+                        return copy;
+                      });
+                    }
+                  }}
+                  placeholder="e.g. Table 4, T-08, or Window Booth 2"
+                  className={fieldErrors.tableNumber ? "border-destructive focus-visible:ring-destructive" : ""}
+                />
+                {fieldErrors.tableNumber && (
+                  <p className="text-xs text-destructive flex items-center gap-1">
+                    <AlertCircle className="size-3.5" /> {fieldErrors.tableNumber}
+                  </p>
+                )}
+                <p className="text-[11px] text-muted-foreground">
+                  Look at your table plaque or scan your on-table QR code to route orders directly to your seating.
+                </p>
+              </div>
+            )}
+
+            {orderType === "TAKEAWAY" && (
+              <div className="mt-5 p-4 sm:p-5 rounded-2xl bg-background/70 border border-border/80 space-y-4">
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div>
+                    <Label htmlFor="takeawayName" className="text-xs font-semibold">
+                      Customer Name (Required)
+                    </Label>
+                    <Input
+                      id="takeawayName"
+                      value={name}
+                      onChange={(e) => {
+                        setName(e.target.value);
+                        if (fieldErrors.name) {
+                          setFieldErrors((prev) => {
+                            const copy = { ...prev };
+                            delete copy.name;
+                            return copy;
+                          });
+                        }
+                      }}
+                      placeholder="Alex Morgan"
+                      className={`mt-1.5 ${fieldErrors.name ? "border-destructive focus-visible:ring-destructive" : ""}`}
+                    />
+                    {fieldErrors.name && (
+                      <p className="text-xs text-destructive mt-1 flex items-center gap-1">
+                        <AlertCircle className="size-3.5" /> {fieldErrors.name}
+                      </p>
+                    )}
+                  </div>
+                  <div>
+                    <Label htmlFor="takeawayPhone" className="text-xs font-semibold">
+                      Phone Number (Required for pickup SMS)
+                    </Label>
+                    <Input
+                      id="takeawayPhone"
+                      type="tel"
+                      value={phone}
+                      onChange={(e) => {
+                        setPhone(e.target.value);
+                        if (fieldErrors.phone) {
+                          setFieldErrors((prev) => {
+                            const copy = { ...prev };
+                            delete copy.phone;
+                            return copy;
+                          });
+                        }
+                      }}
+                      placeholder="+91 98765 43210"
+                      className={`mt-1.5 ${fieldErrors.phone ? "border-destructive focus-visible:ring-destructive" : ""}`}
+                    />
+                    {fieldErrors.phone && (
+                      <p className="text-xs text-destructive mt-1 flex items-center gap-1">
+                        <AlertCircle className="size-3.5" /> {fieldErrors.phone}
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                <div>
+                  <Label className="text-xs font-semibold flex items-center gap-1.5">
+                    <Clock className="size-3.5 text-accent" /> Estimated Pickup Time (Optional)
+                  </Label>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {["ASAP (~15-20 mins)", "In 30 mins", "In 45 mins", "In 1 hour"].map((preset) => (
+                      <Button
+                        key={preset}
+                        type="button"
+                        size="sm"
+                        variant={pickupTime === preset ? "default" : "outline"}
+                        onClick={() => setPickupTime(preset)}
+                        className="text-xs h-8"
+                      >
+                        {preset}
+                      </Button>
+                    ))}
+                  </div>
+                  <Input
+                    value={pickupTime}
+                    onChange={(e) => setPickupTime(e.target.value)}
+                    placeholder="Or type custom pickup time (e.g. 1:30 PM)"
+                    className="mt-2 text-xs"
+                  />
+                </div>
+
+                <div className="rounded-xl bg-accent/10 border border-accent/20 p-3 text-xs text-muted-foreground flex items-center justify-between">
+                  <span className="flex items-center gap-1.5">
+                    <Package className="size-3.5 text-accent" /> Insulated Eco-Packaging
+                  </span>
+                  <span className="font-semibold text-foreground">
+                    {packagingCharge > 0 ? `₹${packagingCharge}` : "FREE (₹0)"}
+                  </span>
                 </div>
               </div>
-            </div>
-            <div className="mt-6">
-              <Label>Available Time Slots</Label>
-              <div className="mt-2 grid grid-cols-3 sm:grid-cols-6 gap-2">
-                {times.map((t) => {
-                  const isSlotPeak = ["08:30", "09:00", "09:30", "17:30"].includes(t);
-                  return (
-                    <Button
-                      key={t}
-                      type="button"
-                      size="sm"
-                      variant={time === t ? "default" : "outline"}
-                      onClick={() => setTime(t)}
-                      className={`relative flex flex-col items-center py-2 h-auto ${
-                        time === t ? "ring-2 ring-accent" : ""
-                      }`}
-                    >
-                      <span className="font-semibold text-xs">{t}</span>
-                      {isSlotPeak && (
-                        <span className="text-[9px] text-accent/80 flex items-center gap-0.5 mt-0.5">
-                          <Flame className="size-2.5" /> Peak
-                        </span>
-                      )}
-                    </Button>
-                  );
-                })}
-              </div>
-            </div>
-          </section>
+            )}
 
-          {/* STEP 2: Table Type Selection */}
-          <section>
-            <div className="flex items-center gap-2">
-              <span className="flex size-7 items-center justify-center rounded-full bg-primary text-xs text-primary-foreground font-bold">
-                2
-              </span>
-              <h2 className="text-xl font-display">Select Table Type</h2>
-            </div>
-            <div className="mt-6 grid gap-4 sm:grid-cols-2">
-              {tableTypes.map((table) => {
-                const isSelected = selectedTableType === table.id;
-                const isCapacityFit = party >= table.minCapacity && party <= table.maxCapacity;
-                const availableLeft = Math.max(1, table.totalTables - (party % 3));
-
-                return (
-                  <button
-                    key={table.id}
-                    type="button"
-                    onClick={() => setSelectedTableType(table.id)}
-                    className={`flex flex-col justify-between rounded-xl border p-4 text-left transition-all cursor-pointer ${
-                      isSelected
-                        ? "border-accent bg-accent/10 shadow-sm ring-1 ring-accent"
-                        : "border-border/80 bg-card hover:bg-secondary/40 hover:border-border"
-                    } ${!isCapacityFit ? "opacity-75" : ""}`}
-                  >
-                    <div>
-                      <div className="flex items-start justify-between gap-2">
-                        <span className="font-semibold text-base text-foreground">{table.name}</span>
-                        <Badge
-                          variant={isSelected ? "default" : "secondary"}
-                          className="text-[10px] font-normal"
-                        >
-                          {table.tag}
-                        </Badge>
-                      </div>
-                      <p className="mt-1.5 text-xs text-muted-foreground leading-relaxed">
-                        {table.description}
+            {orderType === "DELIVERY" && (
+              <div className="mt-5 p-4 sm:p-5 rounded-2xl bg-background/70 border border-border/80 space-y-4">
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div>
+                    <Label htmlFor="deliveryName" className="text-xs font-semibold">
+                      Recipient Name (Required)
+                    </Label>
+                    <Input
+                      id="deliveryName"
+                      value={name}
+                      onChange={(e) => {
+                        setName(e.target.value);
+                        if (fieldErrors.name) {
+                          setFieldErrors((prev) => {
+                            const copy = { ...prev };
+                            delete copy.name;
+                            return copy;
+                          });
+                        }
+                      }}
+                      placeholder="Alex Morgan"
+                      className={`mt-1.5 ${fieldErrors.name ? "border-destructive focus-visible:ring-destructive" : ""}`}
+                    />
+                    {fieldErrors.name && (
+                      <p className="text-xs text-destructive mt-1 flex items-center gap-1">
+                        <AlertCircle className="size-3.5" /> {fieldErrors.name}
                       </p>
-                    </div>
+                    )}
+                  </div>
+                  <div>
+                    <Label htmlFor="deliveryPhone" className="text-xs font-semibold">
+                      Phone Number (Required for rider)
+                    </Label>
+                    <Input
+                      id="deliveryPhone"
+                      type="tel"
+                      value={phone}
+                      onChange={(e) => {
+                        setPhone(e.target.value);
+                        if (fieldErrors.phone) {
+                          setFieldErrors((prev) => {
+                            const copy = { ...prev };
+                            delete copy.phone;
+                            return copy;
+                          });
+                        }
+                      }}
+                      placeholder="+91 98765 43210"
+                      className={`mt-1.5 ${fieldErrors.phone ? "border-destructive focus-visible:ring-destructive" : ""}`}
+                    />
+                    {fieldErrors.phone && (
+                      <p className="text-xs text-destructive mt-1 flex items-center gap-1">
+                        <AlertCircle className="size-3.5" /> {fieldErrors.phone}
+                      </p>
+                    )}
+                  </div>
+                </div>
 
-                    <div className="mt-4 pt-3 border-t border-border/50 flex items-center justify-between text-xs">
-                      <span className="text-muted-foreground">
-                        Seats: {table.minCapacity}–{table.maxCapacity} guests
-                      </span>
-                      <span className="font-medium text-accent">
-                        🟢 {availableLeft} {availableLeft === 1 ? "table left" : "tables available"}
-                      </span>
+                <div className="space-y-3">
+                  <div>
+                    <Label htmlFor="deliveryStreet" className="text-xs font-semibold flex items-center gap-1">
+                      <MapPin className="size-3.5 text-accent" /> Street Address / Flat / Building (Required)
+                    </Label>
+                    <Input
+                      id="deliveryStreet"
+                      value={deliveryStreet}
+                      onChange={(e) => {
+                        setDeliveryStreet(e.target.value);
+                        if (fieldErrors.deliveryStreet) {
+                          setFieldErrors((prev) => {
+                            const copy = { ...prev };
+                            delete copy.deliveryStreet;
+                            return copy;
+                          });
+                        }
+                      }}
+                      placeholder="Flat 302, Green Garden Apts, 5th Cross Road"
+                      className={`mt-1.5 ${fieldErrors.deliveryStreet ? "border-destructive focus-visible:ring-destructive" : ""}`}
+                    />
+                    {fieldErrors.deliveryStreet && (
+                      <p className="text-xs text-destructive mt-1 flex items-center gap-1">
+                        <AlertCircle className="size-3.5" /> {fieldErrors.deliveryStreet}
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <div>
+                      <Label htmlFor="deliveryLandmark" className="text-xs font-semibold">
+                        Landmark / Area (Optional)
+                      </Label>
+                      <Input
+                        id="deliveryLandmark"
+                        value={deliveryLandmark}
+                        onChange={(e) => setDeliveryLandmark(e.target.value)}
+                        placeholder="Opposite Metro Gate 2"
+                        className="mt-1.5 text-xs"
+                      />
                     </div>
-                  </button>
-                );
-              })}
-            </div>
+                    <div>
+                      <Label htmlFor="deliveryPincode" className="text-xs font-semibold">
+                        Postal Pincode (6 digits, Required)
+                      </Label>
+                      <Input
+                        id="deliveryPincode"
+                        inputMode="numeric"
+                        autoComplete="postal-code"
+                        maxLength={6}
+                        value={deliveryPincode}
+                        onChange={(e) => {
+                          setDeliveryPincode(e.target.value.replace(/\D/g, ""));
+                          if (fieldErrors.deliveryPincode) {
+                            setFieldErrors((prev) => {
+                              const copy = { ...prev };
+                              delete copy.deliveryPincode;
+                              return copy;
+                            });
+                          }
+                        }}
+                        placeholder="560034"
+                        className={`mt-1.5 text-xs ${fieldErrors.deliveryPincode ? "border-destructive focus-visible:ring-destructive" : ""}`}
+                      />
+                      {fieldErrors.deliveryPincode && (
+                        <p className="text-xs text-destructive mt-1 flex items-center gap-1">
+                          <AlertCircle className="size-3.5" /> {fieldErrors.deliveryPincode}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+
+                  <div>
+                    <Label htmlFor="deliveryInstructions" className="text-xs font-semibold">
+                      Delivery Instructions (Optional)
+                    </Label>
+                    <Input
+                      id="deliveryInstructions"
+                      value={deliveryInstructions}
+                      onChange={(e) => setDeliveryInstructions(e.target.value)}
+                      placeholder="Leave with security gate, ring bell twice, etc."
+                      className="mt-1.5 text-xs"
+                    />
+                  </div>
+                </div>
+
+                <div className="rounded-xl bg-accent/10 border border-accent/20 p-3 text-xs text-muted-foreground flex items-center justify-between">
+                  <span className="flex items-center gap-1.5">
+                    <Bike className="size-3.5 text-accent" /> Doorstep Express Delivery
+                  </span>
+                  <span className="font-semibold text-foreground">
+                    ₹{deliveryFee}
+                  </span>
+                </div>
+              </div>
+            )}
           </section>
 
-          {/* STEP 3: Merged Pre-Order Flow */}
-          <section className="rounded-2xl border border-border/80 bg-secondary/30 p-6 shadow-xs">
+          {/* DINE-IN SPECIFIC SECTIONS: Date, Time & Table Selection */}
+          {orderType === "DINE_IN" && (
+            <>
+              {/* STEP 2: Date, Time & Party */}
+              <section>
+                <div className="flex items-center gap-2">
+                  <span className="flex size-7 items-center justify-center rounded-full bg-primary text-xs text-primary-foreground font-bold">
+                    2
+                  </span>
+                  <h2 className="text-xl font-display">Date & Time Slot</h2>
+                </div>
+                <div className="mt-6 grid gap-5 sm:grid-cols-2">
+                  <div>
+                    <Label htmlFor="date">Reservation Date</Label>
+                    <Input
+                      id="date"
+                      type="date"
+                      min={today()}
+                      value={date}
+                      onChange={(e) => setDate(e.target.value)}
+                      className="mt-2"
+                    />
+                  </div>
+                  <div>
+                    <Label>Party Size</Label>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {partySizes.map((p) => (
+                        <Button
+                          key={p}
+                          type="button"
+                          size="sm"
+                          variant={party === p ? "default" : "outline"}
+                          onClick={() => setParty(p)}
+                          className="size-9 p-0"
+                        >
+                          {p}
+                        </Button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+                <div className="mt-6">
+                  <Label>Available Time Slots</Label>
+                  <div className="mt-2 grid grid-cols-3 sm:grid-cols-6 gap-2">
+                    {times.map((t) => {
+                      const isSlotPeak = ["08:30", "09:00", "09:30", "17:30"].includes(t);
+                      return (
+                        <Button
+                          key={t}
+                          type="button"
+                          size="sm"
+                          variant={time === t ? "default" : "outline"}
+                          onClick={() => setTime(t)}
+                          className={`relative flex flex-col items-center py-2 h-auto ${
+                            time === t ? "ring-2 ring-accent" : ""
+                          }`}
+                        >
+                          <span className="font-semibold text-xs">{t}</span>
+                          {isSlotPeak && (
+                            <span className="text-[9px] text-accent/80 flex items-center gap-0.5 mt-0.5">
+                              <Flame className="size-2.5" /> Peak
+                            </span>
+                          )}
+                        </Button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </section>
+
+              {/* STEP 3: Table Type Selection */}
+              <section>
+                <div className="flex items-center gap-2">
+                  <span className="flex size-7 items-center justify-center rounded-full bg-primary text-xs text-primary-foreground font-bold">
+                    3
+                  </span>
+                  <h2 className="text-xl font-display">Select Table Type</h2>
+                </div>
+                <div className="mt-6 grid gap-4 sm:grid-cols-2">
+                  {tableTypes.map((table) => {
+                    const isSelected = selectedTableType === table.id;
+                    const isCapacityFit = party >= table.minCapacity && party <= table.maxCapacity;
+                    const availableLeft = Math.max(1, table.totalTables - (party % 3));
+
+                    return (
+                      <button
+                        key={table.id}
+                        type="button"
+                        onClick={() => setSelectedTableType(table.id)}
+                        className={`flex flex-col justify-between rounded-xl border p-4 text-left transition-all cursor-pointer ${
+                          isSelected
+                            ? "border-accent bg-accent/10 shadow-sm ring-1 ring-accent"
+                            : "border-border/80 bg-card hover:bg-secondary/40 hover:border-border"
+                        } ${!isCapacityFit ? "opacity-75" : ""}`}
+                      >
+                        <div>
+                          <div className="flex items-start justify-between gap-2">
+                            <span className="font-semibold text-base text-foreground">{table.name}</span>
+                            <Badge
+                              variant={isSelected ? "default" : "secondary"}
+                              className="text-[10px] font-normal"
+                            >
+                              {table.tag}
+                            </Badge>
+                          </div>
+                          <p className="mt-1.5 text-xs text-muted-foreground leading-relaxed">
+                            {table.description}
+                          </p>
+                        </div>
+
+                        <div className="mt-4 pt-3 border-t border-border/50 flex items-center justify-between text-xs">
+                          <span className="text-muted-foreground">
+                            Seats: {table.minCapacity}–{table.maxCapacity} guests
+                          </span>
+                          <span className="font-medium text-accent">
+                            🟢 {availableLeft} {availableLeft === 1 ? "table left" : "tables available"}
+                          </span>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </section>
+            </>
+          )}
+
+          {/* STEP 4 (Dine-in) / STEP 2 (Takeaway, Delivery): Food & Drinks */}
+          <section
+            id="order-cart"
+            className={`rounded-2xl border bg-secondary/30 p-6 shadow-xs ${
+              fieldErrors.cart ? "border-destructive/60" : "border-border/80"
+            }`}
+          >
             <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
               <div className="flex items-center gap-2">
                 <span className="flex size-7 items-center justify-center rounded-full bg-primary text-xs text-primary-foreground font-bold">
-                  3
+                  {orderType === "DINE_IN" ? 4 : 2}
                 </span>
                 <div>
-                  <h2 className="text-xl font-display">Food & Drinks Ready on Arrival?</h2>
+                  <h2 className="text-xl font-display">
+                    {orderType === "DINE_IN" ? "Food & Drinks Ready on Arrival?" : "Add Food & Drinks"}
+                  </h2>
                   <p className="text-xs text-muted-foreground">
-                    Optional inline pre-order so coffees & bakery land the minute you sit down.
+                    {orderType === "DINE_IN"
+                      ? "Optional inline pre-order so coffees & bakery land the minute you sit down."
+                      : `Add at least one item for your ${orderType === "TAKEAWAY" ? "takeaway" : "delivery"} order.`}
                   </p>
                 </div>
               </div>
 
+              {orderType === "DINE_IN" && (
               <div className="flex items-center rounded-xl border border-border bg-background p-1 shrink-0">
                 <button
                   type="button"
@@ -1083,11 +1707,18 @@ function ReservePage() {
                   Order at Café
                 </button>
               </div>
+              )}
             </div>
+
+            {fieldErrors.cart && (
+              <p role="alert" className="mt-4 text-xs text-destructive flex items-center gap-1">
+                <AlertCircle className="size-3.5" /> {fieldErrors.cart}
+              </p>
+            )}
 
             {wantFoodOnArrival && (
               <div className="mt-8 space-y-6 animate-in fade-in-50 duration-300">
-                {readyTimeEstimate && (
+                {orderType === "DINE_IN" && readyTimeEstimate && (
                   <div className="rounded-xl border border-accent/40 bg-accent/15 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-xs">
                     <div className="flex items-center gap-3">
                       <div className="size-10 rounded-lg bg-accent flex items-center justify-center text-accent-foreground shrink-0">
@@ -1295,11 +1926,11 @@ function ReservePage() {
             )}
           </section>
 
-          {/* STEP 4: Preferences & Notes */}
+          {/* STEP 5 (Dine-in) / STEP 3: Preferences & Notes */}
           <section>
             <div className="flex items-center gap-2">
               <span className="flex size-7 items-center justify-center rounded-full bg-primary text-xs text-primary-foreground font-bold">
-                4
+                {orderType === "DINE_IN" ? 5 : 3}
               </span>
               <h2 className="text-xl font-display">Preferences & Requests</h2>
             </div>
@@ -1376,25 +2007,69 @@ function ReservePage() {
         {/* SIDEBAR BOOKING SUMMARY */}
         <aside className="w-full lg:w-[380px] lg:shrink-0">
           <div className="rounded-2xl border border-border bg-card p-6 shadow-warm">
-            <h3 className="text-xl font-display text-foreground">Reservation Summary</h3>
-            <p className="mt-1 text-xs text-muted-foreground">
-              {date} · {time} · {party} {party === 1 ? "Guest" : "Guests"}
-            </p>
-            <p className="text-xs font-medium text-accent mt-0.5">
-              📍 {tableTypes.find((t) => t.id === selectedTableType)?.name}
-            </p>
+            <div className="flex items-center justify-between pb-3 border-b border-border/70">
+              <h3 className="text-xl font-display text-foreground">Order Summary</h3>
+              <Badge className={`px-2.5 py-0.5 text-xs font-semibold flex items-center gap-1 shadow-xs ${getOrderTypeDetails(orderType).badgeClass}`}>
+                {orderType === "DINE_IN" && <Utensils className="size-3" />}
+                {orderType === "TAKEAWAY" && <ShoppingBag className="size-3" />}
+                {orderType === "DELIVERY" && <Bike className="size-3" />}
+                {getOrderTypeDetails(orderType).label}
+              </Badge>
+            </div>
 
-            <div className="mt-6 space-y-4">
+            <div className="mt-3 text-xs space-y-1 text-muted-foreground">
+              {orderType === "DINE_IN" && (
+                <>
+                  <p className="font-medium text-foreground">
+                    {tableNumber ? `Table #${tableNumber}` : "Table pending"} · {party} {party === 1 ? "Guest" : "Guests"}
+                  </p>
+                  <p>{date} at {time} · {tableTypes.find((t) => t.id === selectedTableType)?.name}</p>
+                </>
+              )}
+              {orderType === "TAKEAWAY" && (
+                <>
+                  <p className="font-medium text-foreground">Self Pickup: {pickupTime || "ASAP (~15-20 mins)"}</p>
+                  <p>Collect hot & packed at front counter</p>
+                </>
+              )}
+              {orderType === "DELIVERY" && (
+                <>
+                  <p className="font-medium text-foreground">
+                    {deliveryStreet ? `${deliveryStreet}${deliveryPincode ? ` (${deliveryPincode})` : ""}` : "Delivery address required"}
+                  </p>
+                  <p>Express courier dispatch</p>
+                </>
+              )}
+            </div>
+
+            <div className="mt-5 space-y-4">
+              {/* Takeaway & Delivery collect name/phone in their own panel above */}
+              {orderType === "DINE_IN" && (
+              <>
               <div>
                 <Label htmlFor="name">Your Name</Label>
                 <Input
                   id="name"
                   value={name}
-                  onChange={(e) => setName(e.target.value)}
+                  onChange={(e) => {
+                    setName(e.target.value);
+                    if (fieldErrors.name) {
+                      setFieldErrors((prev) => {
+                        const copy = { ...prev };
+                        delete copy.name;
+                        return copy;
+                      });
+                    }
+                  }}
                   placeholder={user?.name || "e.g. Alex Morgan"}
-                  className="mt-1.5"
+                  className={`mt-1.5 ${fieldErrors.name ? "border-destructive focus-visible:ring-destructive" : ""}`}
                   required
                 />
+                {fieldErrors.name && (
+                  <p className="text-xs text-destructive mt-1 flex items-center gap-1">
+                    <AlertCircle className="size-3.5" /> {fieldErrors.name}
+                  </p>
+                )}
               </div>
               <div>
                 <Label htmlFor="phone">Phone Number</Label>
@@ -1402,19 +2077,35 @@ function ReservePage() {
                   id="phone"
                   type="tel"
                   value={phone}
-                  onChange={(e) => setPhone(e.target.value)}
+                  onChange={(e) => {
+                    setPhone(e.target.value);
+                    if (fieldErrors.phone) {
+                      setFieldErrors((prev) => {
+                        const copy = { ...prev };
+                        delete copy.phone;
+                        return copy;
+                      });
+                    }
+                  }}
                   placeholder={user?.phone || "+91 90000 00000"}
-                  className="mt-1.5"
+                  className={`mt-1.5 ${fieldErrors.phone ? "border-destructive focus-visible:ring-destructive" : ""}`}
                   required
                 />
+                {fieldErrors.phone && (
+                  <p className="text-xs text-destructive mt-1 flex items-center gap-1">
+                    <AlertCircle className="size-3.5" /> {fieldErrors.phone}
+                  </p>
+                )}
                 {hasPriorBookings && (
                   <p className="mt-1 text-[11px] text-emerald-600 flex items-center gap-1">
                     <ShieldCheck className="size-3.5" /> Welcome back! Repeat guest verified.
                   </p>
                 )}
               </div>
+              </>
+              )}
               <div>
-                <Label htmlFor="email">Email (Optional for confirmation)</Label>
+                <Label htmlFor="email">Email (Optional for tax receipt)</Label>
                 <Input
                   id="email"
                   type="email"
@@ -1428,12 +2119,12 @@ function ReservePage() {
 
             {items.length > 0 && (
               <div className="mt-6 border-t border-border/70 pt-4 text-xs space-y-3">
-                <p className="eyebrow">Pre-Order Cart ({items.length} items)</p>
+                <p className="eyebrow">Cart Items ({items.length} items)</p>
 
                 {preOrderedItems.length > 0 && (
                   <div>
                     <span className="text-[11px] font-semibold text-accent flex items-center gap-1 mb-1">
-                      <Sparkles className="size-3" /> Ready on Arrival:
+                      <Sparkles className="size-3" /> Ready on Arrival / Freshly Prepared:
                     </span>
                     <ul className="space-y-1 pl-1">
                       {preOrderedItems.map((i) => (
@@ -1467,9 +2158,36 @@ function ReservePage() {
                 )}
 
                 <div className="flex justify-between font-medium pt-2 border-t border-border/60 text-sm">
-                  <span>Food Total</span>
+                  <span>Food Items Subtotal</span>
                   <span>₹{foodTotal}</span>
                 </div>
+
+                {packagingCharge > 0 && (
+                  <div className="flex justify-between text-muted-foreground pt-1">
+                    <span className="flex items-center gap-1">
+                      <Package className="size-3 text-accent" /> Packaging Charge
+                    </span>
+                    <span className="font-medium text-foreground">₹{packagingCharge}</span>
+                  </div>
+                )}
+
+                {deliveryFee > 0 && (
+                  <div className="flex justify-between text-muted-foreground pt-1">
+                    <span className="flex items-center gap-1">
+                      <Bike className="size-3 text-accent" /> Delivery Fee
+                    </span>
+                    <span className="font-medium text-foreground">₹{deliveryFee}</span>
+                  </div>
+                )}
+
+                {depositAmount > 0 && (
+                  <div className="flex justify-between text-muted-foreground pt-1">
+                    <span className="flex items-center gap-1">
+                      <ShieldCheck className="size-3 text-accent" /> Table Reservation Deposit
+                    </span>
+                    <span className="font-medium text-foreground">₹{depositAmount}</span>
+                  </div>
+                )}
               </div>
             )}
 
@@ -1535,10 +2253,11 @@ function ReservePage() {
                 />
                 <div className="flex-1">
                   <p className="font-semibold text-foreground flex items-center gap-1">
-                    <Banknote className="size-3.5 text-muted-foreground" /> Pay at Counter (Cash)
+                    <Banknote className="size-3.5 text-muted-foreground" />
+                    {orderType === "DELIVERY" ? "Cash on Delivery" : "Pay at Counter (Cash)"}
                   </p>
                   <p className="text-[11px] text-muted-foreground mt-0.5">
-                    Order flagged for staff confirmation on arrival.
+                    {orderType === "DELIVERY" ? "Pay rider upon delivery arrival." : "Order confirmed for counter payment."}
                   </p>
                 </div>
               </label>
@@ -1569,10 +2288,14 @@ function ReservePage() {
               disabled={submitting || outOfStockInCart.length > 0}
             >
               {submitting
-                ? "Confirming Table…"
+                ? "Placing Order…"
                 : outOfStockInCart.length > 0
                 ? "Remove Out of Stock Items to Confirm"
-                : "Confirm Table & Pre-Order"}
+                : orderType === "DINE_IN"
+                ? "Confirm Table & Place Order"
+                : orderType === "TAKEAWAY"
+                ? "Confirm & Place Takeaway Order"
+                : "Confirm & Place Delivery Order"}
             </Button>
           </div>
         </aside>

@@ -8,6 +8,14 @@ import { verifyRazorpayPaymentSignature } from "@/lib/razorpay.service";
 import { storeReceipt, generateReceiptNumber } from "@/lib/receipt.service";
 import { createAdminNotification } from "@/lib/admin-notifications";
 import { logActivity } from "@/lib/audit-logs";
+import { getCafeSettings } from "@/lib/settings.functions";
+import {
+  ORDER_TYPE_VALUES,
+  getOrderCharges,
+  getOrderTypeDetails,
+  normalizeOrderType,
+  validateOrderDetails,
+} from "@/lib/order-types";
 
 export const orderItemSchema = z.object({
   id: z.string(),
@@ -23,7 +31,12 @@ export const orderItemSchema = z.object({
 
 export type OrderItem = z.infer<typeof orderItemSchema>;
 export type KitchenStatus = "new" | "preparing" | "ready" | "completed" | "cancelled";
-export type OrderType = "dine_in" | "takeaway" | "delivery";
+
+// Accepts legacy lowercase values ("dine_in") but always yields the uppercase enum.
+const orderTypeSchema = z.preprocess(
+  (v) => (typeof v === "string" ? v.trim().toUpperCase().replace(/[\s-]/g, "_") : v),
+  z.enum(ORDER_TYPE_VALUES)
+);
 
 const bookingSchema = z.object({
   code: z.string().min(1),
@@ -55,7 +68,15 @@ const bookingSchema = z.object({
   userId: z.string().optional().nullable(),
   status: z.enum(["confirmed", "cancelled", "completed", "no_show"]).default("confirmed"),
   kitchenStatus: z.enum(["new", "preparing", "ready", "completed", "cancelled"]).default("new"),
-  orderType: z.enum(["dine_in", "takeaway", "delivery"]).default("dine_in"),
+  orderType: orderTypeSchema.default("DINE_IN"),
+  tableNumber: z.string().max(20).optional().nullable(),
+  customerName: z.string().max(100).optional().nullable(),
+  customerPhone: z.string().max(30).optional().nullable(),
+  deliveryAddress: z.string().max(300).optional().nullable(),
+  deliveryInstructions: z.string().max(300).optional().nullable(),
+  pickupTime: z.string().max(50).optional().nullable(),
+  deliveryFee: z.number().min(0).optional().nullable().default(0),
+  packagingCharge: z.number().min(0).optional().nullable().default(0),
   cancellationReason: z.string().optional(),
   cancelledBy: z.enum(["customer", "admin", "kitchen"]).optional(),
   acceptedAt: z.string().optional(),
@@ -95,6 +116,23 @@ export function getPublicClient() {
       },
     },
   });
+}
+
+type BookingRow = Database["public"]["Tables"]["bookings"]["Row"];
+
+/** Maps the order-type columns of a bookings row to BookingInput fields. */
+function mapOrderTypeFields(d: Partial<BookingRow>) {
+  return {
+    orderType: normalizeOrderType(d.order_type),
+    tableNumber: d.table_number ?? null,
+    customerName: d.customer_name ?? null,
+    customerPhone: d.customer_phone ?? null,
+    deliveryAddress: d.delivery_address ?? null,
+    deliveryInstructions: d.delivery_instructions ?? null,
+    pickupTime: d.pickup_time ?? null,
+    deliveryFee: Number(d.delivery_fee ?? 0),
+    packagingCharge: Number(d.packaging_charge ?? 0),
+  };
 }
 
 const memoryBookings = new Map<string, string>();
@@ -181,6 +219,42 @@ export function evaluateSlotAndCustomer({
 export async function createBooking({ data }: { data: BookingInput }) {
   const validated = bookingSchema.parse(data);
   const supabase = getPublicClient();
+
+  // ─── Order type rules (mirrored by the enforce_order_type_rules DB trigger) ───
+  const orderType = validated.orderType;
+  validated.customerName = (validated.customerName || validated.name).trim();
+  validated.customerPhone = (validated.customerPhone || validated.phone).trim();
+
+  const fieldErrors = validateOrderDetails({
+    orderType,
+    customerName: validated.customerName,
+    customerPhone: validated.customerPhone,
+    tableNumber: validated.tableNumber,
+    deliveryAddress: validated.deliveryAddress,
+    itemCount: validated.items.length,
+  });
+  const firstFieldError = Object.values(fieldErrors)[0];
+  if (firstFieldError) {
+    throw new Error(firstFieldError);
+  }
+
+  // Charges come from cafe settings; a mismatch means the client total is stale or tampered with.
+  const charges = getOrderCharges(orderType, await getCafeSettings());
+  if (
+    (validated.deliveryFee ?? 0) !== charges.deliveryFee ||
+    (validated.packagingCharge ?? 0) !== charges.packagingCharge
+  ) {
+    throw new Error("Delivery or packaging charges have changed. Please review your order total and try again.");
+  }
+
+  // Drop fields that don't belong to this order type
+  validated.tableNumber = orderType === "DINE_IN" ? validated.tableNumber!.trim() : null;
+  validated.pickupTime = orderType === "TAKEAWAY" ? validated.pickupTime?.trim() || null : null;
+  validated.deliveryAddress = orderType === "DELIVERY" ? validated.deliveryAddress!.trim() : null;
+  validated.deliveryInstructions =
+    orderType === "DELIVERY" ? validated.deliveryInstructions?.trim() || null : null;
+  validated.deliveryFee = charges.deliveryFee;
+  validated.packagingCharge = charges.packagingCharge;
 
   // ─── Server-side validation: Ensure no out-of-stock items can be booked/ordered ───
   if (validated.items && validated.items.length > 0) {
@@ -269,11 +343,23 @@ export async function createBooking({ data }: { data: BookingInput }) {
       payment_reference: validated.paymentReference ?? null,
       user_id: validated.userId ?? null,
       status: validated.status || "confirmed",
+      order_type: validated.orderType,
+      table_number: validated.tableNumber,
+      customer_name: validated.customerName,
+      customer_phone: validated.customerPhone,
+      delivery_address: validated.deliveryAddress,
+      delivery_instructions: validated.deliveryInstructions,
+      pickup_time: validated.pickupTime,
+      delivery_fee: validated.deliveryFee,
+      packaging_charge: validated.packagingCharge,
     });
 
     if (error) {
       console.error("createBooking error:", error);
-      throw new Error("Could not save your reservation. Please try again.");
+      // 23514 = check_violation raised by the enforce_order_type_rules trigger; its message is customer-facing
+      throw new Error(
+        error.code === "23514" ? error.message : "Could not save your reservation. Please try again."
+      );
     }
 
     // Record customer visit for analytics
@@ -321,9 +407,15 @@ export async function createBooking({ data }: { data: BookingInput }) {
   }).catch((err) => console.warn("Background confirmation notification error:", err));
 
   // Create in-app admin notification for management console
+  const orderTypeLabel = getOrderTypeDetails(orderType).label;
   createAdminNotification({
-    title: "New Reservation",
-    message: `New reservation by ${validated.name} for ${validated.date} at ${validated.time} (${validated.party} ${validated.party === 1 ? "guest" : "guests"}, Table: ${validated.tableType})`,
+    title: orderType === "DINE_IN" ? "New Reservation" : `New ${orderTypeLabel} Order`,
+    message:
+      orderType === "DINE_IN"
+        ? `New reservation by ${validated.name} for ${validated.date} at ${validated.time} (${validated.party} ${validated.party === 1 ? "guest" : "guests"}, Table ${validated.tableNumber})`
+        : `New ${orderTypeLabel.toLowerCase()} order by ${validated.name} (${validated.customerPhone})${
+            orderType === "DELIVERY" ? ` to ${validated.deliveryAddress}` : ` — pickup ${validated.pickupTime || "ASAP"}`
+          }`,
     type: "reservation",
     bookingCode: validated.code,
     customerName: validated.name,
@@ -405,6 +497,7 @@ export async function verifyAndCompleteRazorpayPayment({
         paymentStatus: "paid",
         paymentReference: paymentId,
         userId: data.user_id || undefined,
+        ...mapOrderTypeFields(data),
         status: (data.status as any) || "confirmed",
       };
     }
@@ -592,6 +685,7 @@ export async function cancelBooking({
         paymentStatus: (data.payment_status as any) || "pending_cash",
         paymentReference: data.payment_reference || undefined,
         userId: data.user_id || undefined,
+        ...mapOrderTypeFields(data),
         status: "cancelled",
       };
     }
@@ -709,6 +803,7 @@ export async function getUserBookings(query: UserBookingsQuery): Promise<Booking
         paymentStatus: (d.payment_status as "pending_cash" | "pending_qr" | "paid") || "pending_cash",
         paymentReference: d.payment_reference || undefined,
         userId: d.user_id || undefined,
+        ...mapOrderTypeFields(d),
         status: (d.status as "confirmed" | "cancelled") || "confirmed",
       }));
     }
@@ -792,6 +887,7 @@ export async function getAllBookings(): Promise<BookingInput[]> {
         paymentStatus: (d.payment_status as "pending_cash" | "pending_qr" | "paid") || "pending_cash",
         paymentReference: d.payment_reference || undefined,
         userId: d.user_id || undefined,
+        ...mapOrderTypeFields(d),
         status: (d.status as BookingStatus) || "confirmed",
       }));
     }

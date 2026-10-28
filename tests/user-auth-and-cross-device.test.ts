@@ -92,6 +92,7 @@ async function runTests() {
     time: "19:00",
     party: 2,
     seating: "Window Booth",
+    tableNumber: "W-2",
     tableType: "window",
     hasPreorder: false,
     estimatedPrepTime: 0,
