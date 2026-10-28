@@ -59,6 +59,16 @@ export interface Database {
           completed_at?: string | null;
           cancellation_reason?: string | null;
           cancelled_by?: string | null;
+          payment_required?: boolean;
+          payment_state?: string;
+          total_amount_paise?: number | null;
+          deposit_due_paise?: number;
+          amount_paid_paise?: number;
+          balance_due_paise?: number | null;
+          scheduled_at?: string | null;
+          payment_expires_at?: string | null;
+          forfeited_at?: string | null;
+          forfeit_reason?: string | null;
         };
         Insert: {
           id?: string;
@@ -109,6 +119,16 @@ export interface Database {
           completed_at?: string | null;
           cancellation_reason?: string | null;
           cancelled_by?: string | null;
+          payment_required?: boolean;
+          payment_state?: string;
+          total_amount_paise?: number | null;
+          deposit_due_paise?: number;
+          amount_paid_paise?: number;
+          balance_due_paise?: number | null;
+          scheduled_at?: string | null;
+          payment_expires_at?: string | null;
+          forfeited_at?: string | null;
+          forfeit_reason?: string | null;
         };
         Update: {
           id?: string;
@@ -159,6 +179,16 @@ export interface Database {
           completed_at?: string | null;
           cancellation_reason?: string | null;
           cancelled_by?: string | null;
+          payment_required?: boolean;
+          payment_state?: string;
+          total_amount_paise?: number | null;
+          deposit_due_paise?: number;
+          amount_paid_paise?: number;
+          balance_due_paise?: number | null;
+          scheduled_at?: string | null;
+          payment_expires_at?: string | null;
+          forfeited_at?: string | null;
+          forfeit_reason?: string | null;
         };
       };
       users: {

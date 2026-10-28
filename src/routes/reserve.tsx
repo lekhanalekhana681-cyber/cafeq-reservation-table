@@ -51,6 +51,22 @@ import {
   type OrderType,
   type OrderFieldErrors,
 } from "@/lib/order-types";
+import {
+  computeDuePaise,
+  DEFAULT_PREORDER_SETTINGS,
+  estimateScheduledAt,
+  formatIst,
+  formatPaise,
+  isPreorder,
+  istToday,
+  payForPreorder,
+  PAYMENT_WINDOW_MINUTES,
+  refundCutoffMs,
+  refundPolicyText,
+  PaymentApiError,
+  type PaymentOrderSummary,
+  type PaymentReceipt,
+} from "@/lib/prepayment";
 
 const categories = categoriesRaw ?? [];
 const menu = menuRaw ?? [];
@@ -158,7 +174,8 @@ const occasions = [
 ];
 
 const inr = (val: number) => Math.round(val);
-const today = () => new Date().toISOString().slice(0, 10);
+// Cafe dates are IST; toISOString() alone gives the UTC date (wrong between 00:00 and 05:30 IST)
+const today = () => istToday();
 const genCode = () => `CQ-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
 
 type CartItemState = {
@@ -169,13 +186,14 @@ type CartItemState = {
 function ReservePage() {
   const { data: settingsData } = useQuery({
     ...settingsQueryOptions,
-    initialData: { upiId: "cafeq@upi", upiPayeeName: "The CAFEQ", deliveryFee: 40, packagingCharge: 0 },
+    initialData: { upiId: "cafeq@upi", upiPayeeName: "The CAFEQ", deliveryFee: 40, packagingCharge: 0, ...DEFAULT_PREORDER_SETTINGS },
   });
   const settings = settingsData ?? {
     upiId: "cafeq@upi",
     upiPayeeName: "The CAFEQ",
     deliveryFee: 40,
     packagingCharge: 0,
+    ...DEFAULT_PREORDER_SETTINGS,
   };
   const search = Route.useSearch();
   const navigate = useNavigate();
@@ -375,6 +393,20 @@ function ReservePage() {
   const [code, setCode] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
+  // Pre-order online payment
+  const [agreedToPolicy, setAgreedToPolicy] = useState(false);
+  const [payingNow, setPayingNow] = useState(false);
+  const [preorderPay, setPreorderPay] = useState<{
+    status: "awaiting" | "paid" | "expired";
+    duePaise: number;
+    totalPaise: number;
+    expiresAt: string | null;
+    scheduledAt: string | null;
+    order?: PaymentOrderSummary;
+    receipt?: PaymentReceipt;
+    error?: string;
+  } | null>(null);
+
   // Post-booking QR and Online payment state
   const [qrPaymentStatus, setQrPaymentStatus] = useState<"pending" | "paid">("pending");
   const [txnRef, setTxnRef] = useState("");
@@ -478,8 +510,26 @@ function ReservePage() {
 
   const foodTotal = items.reduce((sum, i) => sum + i.price * i.qty, 0);
   const { deliveryFee, packagingCharge } = getOrderCharges(orderType, settings);
-  const depositAmount = orderType === "DINE_IN" && slotEvaluation.depositRequired ? slotEvaluation.depositAmount : 0;
+
+  // Pre-orders (food prepared ahead for a future pickup/arrival) need an online deposit or
+  // full prepayment. The database makes the final call and computes the amounts; this mirror
+  // only drives the checkout breakdown. Needs Supabase + the /api payment functions.
+  const prepayActive =
+    Boolean(getPublicClient()) &&
+    settings.preorderPaymentMode !== "NONE" &&
+    isPreorder({ orderType, date, time, pickupTime, items });
+  const prepayFull = settings.preorderPaymentMode === "FULL";
+
+  // The old fixed table deposit is replaced by the pre-order deposit
+  const depositAmount =
+    !prepayActive && orderType === "DINE_IN" && slotEvaluation.depositRequired ? slotEvaluation.depositAmount : 0;
   const totalWithDeposit = foodTotal + deliveryFee + packagingCharge + depositAmount;
+
+  const estTotalPaise = (foodTotal + deliveryFee + packagingCharge) * 100;
+  const estDuePaise = prepayActive ? computeDuePaise(estTotalPaise, settings) : 0;
+  const estCutoffAt = prepayActive
+    ? refundCutoffMs(estimateScheduledAt({ orderType, date, time, pickupTime }), settings.refundCutoffMinutes)
+    : null;
 
   const readyTimeEstimate = useMemo(() => {
     if (preOrderedItems.length === 0) return null;
@@ -598,6 +648,12 @@ function ReservePage() {
       return;
     }
 
+    if (prepayActive && !agreedToPolicy) {
+      toast.error("Please agree to the cancellation & refund policy to continue.");
+      return;
+    }
+
+    if (submitting) return;
     setSubmitting(true);
     const bookingCode = genCode();
     const initialPaymentStatus =
@@ -608,7 +664,7 @@ function ReservePage() {
         : "pending_cash";
 
     try {
-      await createBooking({
+      const created = await createBooking({
         data: {
           code: bookingCode,
           orderType,
@@ -643,13 +699,28 @@ function ReservePage() {
           windowPriority,
           items,
           total: totalWithDeposit,
-          paymentMethod,
-          paymentStatus: initialPaymentStatus,
+          paymentMethod: prepayActive ? "online_razorpay" : paymentMethod,
+          paymentStatus: prepayActive ? "pending_online" : initialPaymentStatus,
           userId: user?.id || null,
           status: "confirmed",
           kitchenStatus: "new" as const,
         },
       });
+
+      // Pre-order parked by the database until paid: open Razorpay right away
+      if ("requiresPayment" in created && created.requiresPayment) {
+        setCode(bookingCode);
+        setPreorderPay({
+          status: "awaiting",
+          duePaise: created.payment.depositDuePaise ?? 0,
+          totalPaise: created.payment.totalAmountPaise,
+          expiresAt: created.payment.paymentExpiresAt,
+          scheduledAt: created.payment.scheduledAt,
+        });
+        setSubmitting(false);
+        await startPreorderPayment(bookingCode);
+        return;
+      }
 
       try {
         await sendBookingConfirmationNotifications({
@@ -680,6 +751,42 @@ function ReservePage() {
       toast.error(err instanceof Error ? err.message : "Something went wrong. Please try again.");
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  /** Opens Razorpay for a parked pre-order; the server verifies before the kitchen sees it. */
+  const startPreorderPayment = async (bookingCode: string) => {
+    if (payingNow) return;
+    setPayingNow(true);
+    try {
+      const outcome = await payForPreorder(bookingCode);
+      if (outcome.status === "paid") {
+        setPreorderPay((prev) => prev && { ...prev, status: "paid", order: outcome.order, receipt: outcome.receipt, error: undefined });
+        toast.success("Payment received! Your order is confirmed and sent to the kitchen.");
+        sendBookingConfirmationNotifications({
+          name: name.trim(),
+          phone: phone.trim(),
+          date,
+          time,
+          tableType: orderType === "DINE_IN" ? (tableTypes.find((t) => t.id === selectedTableType)?.name || selectedTableType) : `Order (${orderType})`,
+          partySize: orderType === "DINE_IN" ? party : 1,
+          bookingCode,
+          preOrdered: true,
+          totalAmount: Math.round(outcome.order.totalAmountPaise / 100),
+        }).catch((err) => console.error("Failed to send notification:", err));
+      } else if (outcome.status === "failed") {
+        setPreorderPay((prev) => prev && { ...prev, error: outcome.message });
+        toast.error(outcome.message);
+      } else {
+        toast.info(`Payment not completed. Your order is held for ${PAYMENT_WINDOW_MINUTES} minutes — you can retry below.`);
+      }
+    } catch (err) {
+      const expired = err instanceof PaymentApiError && err.code === "ORDER_EXPIRED";
+      const message = err instanceof Error ? err.message : "Could not start the payment.";
+      setPreorderPay((prev) => prev && { ...prev, status: expired ? "expired" : prev.status, error: message });
+      toast.error(message);
+    } finally {
+      setPayingNow(false);
     }
   };
 
@@ -770,8 +877,16 @@ function ReservePage() {
       <>
         <PageBackground imageUrl="https://images.unsplash.com/photo-1559525839-b184a4d698c7?q=80&w=2000&auto=format&fit=crop" />
         <div className="mx-auto max-w-xl px-5 py-20 text-center relative z-10 bg-background/80 backdrop-blur-md rounded-3xl mt-12 border border-border/50">
-          <div className="mx-auto flex size-14 items-center justify-center rounded-full bg-accent text-accent-foreground shadow-lg">
-            <Check className="size-7" aria-hidden="true" />
+          <div
+            className={`mx-auto flex size-14 items-center justify-center rounded-full shadow-lg ${
+              preorderPay && preorderPay.status !== "paid" ? "bg-amber-500 text-white" : "bg-accent text-accent-foreground"
+            }`}
+          >
+            {preorderPay && preorderPay.status !== "paid" ? (
+              <CreditCard className="size-7" aria-hidden="true" />
+            ) : (
+              <Check className="size-7" aria-hidden="true" />
+            )}
           </div>
 
           {/* Order Type Badge */}
@@ -785,7 +900,13 @@ function ReservePage() {
           </div>
 
           <h1 className="mt-3 text-3xl sm:text-4xl font-display">
-            {orderType === "DINE_IN" ? `You're Booked, ${name.split(" ")[0]}!` : `Order Placed, ${name.split(" ")[0]}!`}
+            {preorderPay?.status === "awaiting"
+              ? "Complete Payment to Confirm"
+              : preorderPay?.status === "expired"
+              ? "Payment Window Expired"
+              : orderType === "DINE_IN"
+              ? `You're Booked, ${name.split(" ")[0]}!`
+              : `Order Placed, ${name.split(" ")[0]}!`}
           </h1>
           <p className="mt-2 text-muted-foreground text-sm">
             {orderType === "DINE_IN" && (
@@ -876,7 +997,119 @@ function ReservePage() {
           </div>
 
         {/* Payment Confirmation Component: Razorpay vs QR Code vs Cash on Arrival */}
-        {paymentMethod === "online_razorpay" ? (
+        {preorderPay ? (
+          <div className="mt-8 rounded-2xl border border-border bg-card p-6 text-left shadow-warm space-y-4" aria-live="polite">
+            <div className="flex items-center justify-between gap-2">
+              <div>
+                <p className="eyebrow text-accent">Pre-order {prepayFull ? "Prepayment" : "Deposit"}</p>
+                <h3 className="text-lg font-semibold text-foreground mt-0.5">
+                  {preorderPay.status === "paid"
+                    ? `Paid ${formatPaise(preorderPay.receipt?.amountPaise ?? preorderPay.duePaise)}`
+                    : `Due now ${formatPaise(preorderPay.duePaise)}`}
+                </h3>
+              </div>
+              <Badge
+                className={
+                  preorderPay.status === "paid"
+                    ? "bg-emerald-600 text-white"
+                    : preorderPay.status === "expired"
+                    ? "bg-muted text-muted-foreground"
+                    : "bg-amber-500/10 text-amber-700"
+                }
+              >
+                {preorderPay.status === "paid" ? "✅ Payment verified" : preorderPay.status === "expired" ? "Expired" : "⏳ Awaiting payment"}
+              </Badge>
+            </div>
+
+            <dl className="text-xs space-y-1.5 border-t border-border/60 pt-3">
+              <div className="flex justify-between">
+                <dt className="text-muted-foreground">Order total</dt>
+                <dd className="font-medium text-foreground">{formatPaise(preorderPay.order?.totalAmountPaise ?? preorderPay.totalPaise)}</dd>
+              </div>
+              <div className="flex justify-between">
+                <dt className="text-muted-foreground">{preorderPay.status === "paid" ? "Paid online" : "Pay online now"}</dt>
+                <dd className="font-medium text-foreground">
+                  {formatPaise(preorderPay.order?.amountPaidPaise ?? preorderPay.duePaise)}
+                </dd>
+              </div>
+              <div className="flex justify-between">
+                <dt className="text-muted-foreground">Balance to pay at the cafe</dt>
+                <dd className="font-semibold text-accent">
+                  {formatPaise(
+                    preorderPay.order?.balanceDuePaise ?? Math.max(0, preorderPay.totalPaise - preorderPay.duePaise)
+                  )}
+                </dd>
+              </div>
+            </dl>
+
+            {preorderPay.status === "awaiting" && (
+              <>
+                <p className="text-xs text-muted-foreground leading-relaxed">
+                  Your order is held — the kitchen only starts once payment is confirmed. Complete payment by{" "}
+                  <strong className="text-foreground">{formatIst(preorderPay.expiresAt, false)} IST</strong>, otherwise it
+                  expires automatically.
+                </p>
+                {preorderPay.error && (
+                  <p role="alert" className="text-xs text-destructive flex items-start gap-1.5">
+                    <AlertCircle className="size-3.5 mt-0.5 shrink-0" /> {preorderPay.error}
+                  </p>
+                )}
+                <Button
+                  onClick={() => code && startPreorderPayment(code)}
+                  disabled={payingNow}
+                  className="w-full bg-accent hover:bg-accent/90 text-accent-foreground font-semibold"
+                  size="lg"
+                >
+                  <CreditCard className="size-4 mr-2" />
+                  {payingNow ? "Processing payment…" : `Pay ${formatPaise(preorderPay.duePaise)} with Razorpay`}
+                </Button>
+              </>
+            )}
+
+            {preorderPay.status === "expired" && (
+              <div className="space-y-3">
+                <p className="text-xs text-muted-foreground">
+                  This order wasn't paid within {PAYMENT_WINDOW_MINUTES} minutes, so it was released and never sent to
+                  the kitchen. Nothing was charged.
+                </p>
+                <Button variant="outline" className="w-full" onClick={() => window.location.reload()}>
+                  <RotateCcw className="size-4 mr-2" /> Start a new order
+                </Button>
+              </div>
+            )}
+
+            {preorderPay.status === "paid" && preorderPay.receipt && (
+              <div className="rounded-xl bg-emerald-500/10 border border-emerald-500/20 p-4 text-xs space-y-1.5">
+                <p className="font-semibold text-emerald-800 dark:text-emerald-300 text-sm">Payment Receipt</p>
+                <div className="flex justify-between gap-2">
+                  <span className="text-muted-foreground">Order</span>
+                  <span className="font-mono text-foreground">{code}</span>
+                </div>
+                <div className="flex justify-between gap-2">
+                  <span className="text-muted-foreground">Razorpay payment ID</span>
+                  <span className="font-mono text-foreground break-all text-right">{preorderPay.receipt.paymentId}</span>
+                </div>
+                <div className="flex justify-between gap-2">
+                  <span className="text-muted-foreground">Paid on</span>
+                  <span className="text-foreground">{formatIst(preorderPay.receipt.paidAt)} IST</span>
+                </div>
+                {preorderPay.receipt.method && (
+                  <div className="flex justify-between gap-2">
+                    <span className="text-muted-foreground">Method</span>
+                    <span className="text-foreground uppercase">{preorderPay.receipt.method}</span>
+                  </div>
+                )}
+                <p className="pt-1 text-muted-foreground">
+                  {refundPolicyText(
+                    refundCutoffMs(preorderPay.order?.scheduledAt ?? preorderPay.scheduledAt, settings.refundCutoffMinutes),
+                    settings.refundCutoffMinutes,
+                    prepayFull
+                  )}
+                </p>
+              </div>
+            )}
+          </div>
+        ) : paymentMethod === "online_razorpay" ? (
           <div className="mt-8 rounded-2xl border border-border bg-card p-6 text-left shadow-warm">
             <div className="flex items-center justify-between">
               <div>
@@ -2191,7 +2424,49 @@ function ReservePage() {
               </div>
             )}
 
-            {/* Payment Options: Razorpay Online vs QR Code vs Cash */}
+            {/* Pre-order: online deposit / prepayment replaces the payment choice */}
+            {prepayActive ? (
+              <div className="mt-5 space-y-3 border-t border-border/70 pt-4 text-xs">
+                <p className="font-semibold text-foreground flex items-center gap-1.5">
+                  <CreditCard className="size-3.5 text-accent" />
+                  {prepayFull ? "Prepayment required for pre-orders" : "Deposit required for pre-orders"}
+                </p>
+                <dl className="space-y-1.5 rounded-xl border border-border bg-secondary/30 p-3">
+                  <div className="flex justify-between">
+                    <dt className="text-muted-foreground">Order total</dt>
+                    <dd className="font-medium text-foreground">{formatPaise(estTotalPaise)}</dd>
+                  </div>
+                  <div className="flex justify-between">
+                    <dt className="text-foreground font-semibold">
+                      {prepayFull ? "Pay online now" : `Deposit due now (${settings.depositPercent}%, min ₹${settings.depositMinInr})`}
+                    </dt>
+                    <dd className="font-bold text-accent">{formatPaise(estDuePaise)}</dd>
+                  </div>
+                  <div className="flex justify-between">
+                    <dt className="text-muted-foreground">Balance to pay at the cafe</dt>
+                    <dd className="font-medium text-foreground">{formatPaise(Math.max(0, estTotalPaise - estDuePaise))}</dd>
+                  </div>
+                </dl>
+                <p className="text-[11px] text-muted-foreground leading-relaxed">
+                  {refundPolicyText(estCutoffAt, settings.refundCutoffMinutes, prepayFull)} Unpaid orders are released
+                  after {PAYMENT_WINDOW_MINUTES} minutes and never reach the kitchen.
+                </p>
+                <label className="flex items-start gap-2.5 rounded-xl border border-border p-2.5 cursor-pointer hover:bg-secondary/40">
+                  <Checkbox
+                    checked={agreedToPolicy}
+                    onCheckedChange={(v) => setAgreedToPolicy(v === true)}
+                    aria-required="true"
+                    className="mt-0.5"
+                  />
+                  <span className="text-foreground">
+                    I agree to the cancellation &amp; refund policy above.
+                  </span>
+                </label>
+                <p className="text-[10px] text-muted-foreground">
+                  Secure payment via Razorpay — UPI, cards, netbanking & wallets. The final amount is confirmed by the cafe's server.
+                </p>
+              </div>
+            ) : (
             <div className="mt-5 space-y-2.5 border-t border-border/70 pt-4">
               <p className="text-xs font-semibold text-foreground">Payment Method</p>
 
@@ -2262,10 +2537,13 @@ function ReservePage() {
                 </div>
               </label>
             </div>
+            )}
 
             <div className="mt-4 pt-3 border-t border-border/70 flex justify-between items-baseline">
-              <span className="font-semibold text-sm">Total Due</span>
-              <span className="font-bold text-accent text-xl">₹{totalWithDeposit}</span>
+              <span className="font-semibold text-sm">{prepayActive ? "Due Now" : "Total Due"}</span>
+              <span className="font-bold text-accent text-xl">
+                {prepayActive ? formatPaise(estDuePaise) : `₹${totalWithDeposit}`}
+              </span>
             </div>
 
             {outOfStockInCart.length > 0 && (
@@ -2285,12 +2563,14 @@ function ReservePage() {
               type="submit"
               className="mt-6 w-full shadow-md"
               size="lg"
-              disabled={submitting || outOfStockInCart.length > 0}
+              disabled={submitting || payingNow || outOfStockInCart.length > 0 || (prepayActive && !agreedToPolicy)}
             >
               {submitting
                 ? "Placing Order…"
                 : outOfStockInCart.length > 0
                 ? "Remove Out of Stock Items to Confirm"
+                : prepayActive
+                ? `Pay ${formatPaise(estDuePaise)} & Place Order`
                 : orderType === "DINE_IN"
                 ? "Confirm Table & Place Order"
                 : orderType === "TAKEAWAY"

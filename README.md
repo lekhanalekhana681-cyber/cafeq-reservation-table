@@ -212,3 +212,38 @@ Open [http://localhost:3000](http://localhost:3000) in your browser.
 3. Click **Authenticate & Open Console**.
 4. Notice the **Manage Kitchen Staff** button to add, disable, or reset kitchen staff accounts.
 
+
+---
+
+## 💳 Pre-order Deposits (Razorpay)
+
+Pre-orders — takeaway orders, and dine-in orders with food pre-ordered for an arrival more than
+15 minutes away — require an online deposit (or full prepayment) before the kitchen sees them.
+Dine-in orders placed at the cafe and delivery orders are unchanged.
+
+**How it works**
+1. The database decides whether an order is a pre-order and prices it from `menu_items`
+   (amounts in integer paise). The order is stored as `pending_payment` and is hidden from the KDS.
+2. `/api/payments/create-order` creates a Razorpay order for the server-computed amount; the customer
+   pays in Razorpay Checkout (UPI, cards, netbanking, wallets).
+3. `/api/payments/verify` checks the signature and confirms the payment with Razorpay, then releases
+   the order to the kitchen. `/api/payments/webhook` does the same if the customer closes the tab.
+4. Unpaid orders expire after 15 minutes (`expire_unpaid_preorders`, every 5 min via pg_cron).
+5. Cancelling before the cutoff refunds the deposit automatically; after it, or on a no-show, the
+   deposit is forfeited. The cafe cancelling always refunds in full.
+
+Settings (mode, deposit %, minimum, cutoff) are edited in **Admin › Payments**, which also handles
+full/partial refunds, forfeits, no-shows and collecting the balance at the counter.
+
+**Setup**
+1. Run the migrations: `supabase db push`
+2. Supabase › Database › Extensions: enable **pg_cron**, then run the last migration again or
+   `select cron.schedule('expire-unpaid-preorders', '*/5 * * * *', 'select public.expire_unpaid_preorders()');`
+3. Vercel › Project › Settings › Environment Variables (Production + Preview), then redeploy:
+   `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET`, `SUPABASE_URL`,
+   `SUPABASE_SERVICE_ROLE_KEY` (optional: `PAYMENTS_ADMIN_SECRET`, `CRON_SECRET`).
+4. Razorpay Dashboard (Test mode) › Webhooks › Add: URL `https://<your-domain>/api/payments/webhook`,
+   secret = `RAZORPAY_WEBHOOK_SECRET`, events `payment.captured`, `payment.failed`, `refund.processed`.
+
+The `/api` functions run on Vercel only; locally use `vercel dev` (plain `npm run dev` can't take payments).
+Run `npm run test:payments-preorder` for the payment test suite.

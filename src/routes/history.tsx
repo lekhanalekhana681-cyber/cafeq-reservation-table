@@ -32,6 +32,17 @@ import {
   ITEM_STATUS_LABELS,
 } from "@/lib/order-items";
 import { subscribeToKitchenEvents } from "@/lib/kitchen.sync";
+import { getCafeSettings } from "@/lib/settings.functions";
+import {
+  cancelPreorder,
+  DEFAULT_PREORDER_SETTINGS,
+  formatIst,
+  formatPaise,
+  payForPreorder,
+  PAYMENT_STATE_BADGE_CLASS,
+  PAYMENT_STATE_LABELS,
+  refundCutoffMs,
+} from "@/lib/prepayment";
 import {
   getReceiptByBookingCode,
   downloadReceiptPdf,
@@ -83,6 +94,14 @@ function HistoryPage() {
   const [loading, setLoading] = useState(false);
   const [activeTab, setActiveTab] = useState<"upcoming" | "past">("upcoming");
   const [cancellingCode, setCancellingCode] = useState<string | null>(null);
+  const [payingCode, setPayingCode] = useState<string | null>(null);
+  const [refundCutoffMinutes, setRefundCutoffMinutes] = useState(DEFAULT_PREORDER_SETTINGS.refundCutoffMinutes);
+
+  useEffect(() => {
+    getCafeSettings()
+      .then((s) => setRefundCutoffMinutes(s.refundCutoffMinutes))
+      .catch(() => {});
+  }, []);
   const [downloadingCode, setDownloadingCode] = useState<string | null>(null);
   const [showPrefs, setShowPrefs] = useState(false);
   const [prefs, setPrefs] = useState<NotificationPreferences>(DEFAULT_PREFERENCES);
@@ -223,14 +242,67 @@ function HistoryPage() {
     fetchBookings(searchPhone);
   };
 
-  const handleCancelBooking = async (code: string) => {
+  /** Retry payment for a pre-order still awaiting payment (within its 15-minute window). */
+  const handlePayNow = async (b: BookingInput) => {
+    if (payingCode) return;
+    setPayingCode(b.code);
+    try {
+      const outcome = await payForPreorder(b.code);
+      if (outcome.status === "paid") {
+        toast.success(`Payment received. Order ${b.code} is confirmed and sent to the kitchen.`);
+      } else if (outcome.status === "failed") {
+        toast.error(outcome.message);
+      }
+      await fetchBookings(undefined, true);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not start the payment.");
+      await fetchBookings(undefined, true);
+    } finally {
+      setPayingCode(null);
+    }
+  };
+
+  const handleCancelBooking = async (b: BookingInput) => {
+    const code = b.code;
+    const paidOnline = b.paymentRequired && (b.amountPaidPaise ?? 0) > 0;
+
+    if (paidOnline) {
+      // Paid pre-order: the server refunds before the cutoff and forfeits after it
+      const cutoff = refundCutoffMs(b.scheduledAt, refundCutoffMinutes);
+      const beforeCutoff = cutoff === null || Date.now() < cutoff;
+      const message = beforeCutoff
+        ? `Cancel ${code}? You'll get a full refund of ${formatPaise(b.amountPaidPaise)} to your original payment method.`
+        : `Cancel ${code}? The free-cancellation window ended at ${formatIst(cutoff)} IST, so your ${formatPaise(b.amountPaidPaise)} deposit is non-refundable.`;
+      if (!window.confirm(message)) return;
+
+      setCancellingCode(code);
+      try {
+        const res = await cancelPreorder(code, b.phone);
+        toast.success(
+          res.action === "refund"
+            ? `Order ${code} cancelled. Refund of ${formatPaise(res.refundedPaise)} issued (5–7 working days).`
+            : `Order ${code} cancelled. The deposit was forfeited as per the cancellation policy.`
+        );
+        await fetchBookings(undefined, true);
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : "Failed to cancel the order.");
+      } finally {
+        setCancellingCode(null);
+      }
+      return;
+    }
+
     if (!window.confirm(`Are you sure you want to cancel reservation ${code}?`)) {
       return;
     }
 
     setCancellingCode(code);
     try {
-      await cancelBooking({ code, userId: user?.id });
+      const res = await cancelBooking({ code, userId: user?.id });
+      if (!res.success) {
+        toast.error(res.error || "Failed to cancel reservation.");
+        return;
+      }
       toast.success(`Reservation ${code} has been cancelled.`);
       // Update local state directly
       setBookings((prev) =>
@@ -496,9 +568,27 @@ function HistoryPage() {
                         </Badge>
                       )}
 
+                      {b.paymentRequired && b.paymentState && (
+                        <Badge variant="outline" className={`text-xs font-semibold ${PAYMENT_STATE_BADGE_CLASS[b.paymentState]}`}>
+                          {PAYMENT_STATE_LABELS[b.paymentState]}
+                        </Badge>
+                      )}
+
                       {isCancelled ? (
                         <Badge variant="destructive" className="text-xs">
                           Cancelled
+                        </Badge>
+                      ) : b.status === "pending_payment" ? (
+                        <Badge variant="outline" className="text-xs text-amber-600 dark:text-amber-400 border-amber-500/40 bg-amber-500/10">
+                          Payment pending
+                        </Badge>
+                      ) : b.status === "expired" ? (
+                        <Badge variant="outline" className="text-xs text-muted-foreground border-border">
+                          Expired — not paid
+                        </Badge>
+                      ) : b.status === "no_show" ? (
+                        <Badge variant="destructive" className="text-xs">
+                          No-show
                         </Badge>
                       ) : (
                         <Badge variant="outline" className="text-xs text-emerald-600 dark:text-emerald-400 border-emerald-500/40 bg-emerald-500/10">
@@ -539,17 +629,52 @@ function HistoryPage() {
                           <MapPin className="size-3.5 text-accent" /> Deliver to: {b.deliveryAddress}
                         </p>
                       )}
+
+                      {/* Pre-order payment summary */}
+                      {b.paymentRequired && (
+                        <p className="text-xs text-foreground flex flex-wrap items-center gap-x-1.5">
+                          <CreditCard className="size-3.5 text-accent" />
+                          {b.status === "pending_payment" ? (
+                            <span>
+                              Pay {formatPaise(b.depositDuePaise)} online by {formatIst(b.paymentExpiresAt, false)} IST to confirm
+                            </span>
+                          ) : (
+                            <span>
+                              Paid online {formatPaise(b.amountPaidPaise)}
+                              {(b.balanceDuePaise ?? 0) > 0 && !["cancelled", "no_show", "expired"].includes(b.status) && (
+                                <> · Balance at the cafe {formatPaise(b.balanceDuePaise)}</>
+                              )}
+                            </span>
+                          )}
+                        </p>
+                      )}
+                      {b.forfeitReason && b.paymentState === "FORFEITED" && (
+                        <p className="text-xs text-destructive">Deposit forfeited: {b.forfeitReason}</p>
+                      )}
                     </div>
                   </div>
 
                   {/* Actions */}
                   <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+                    {/* Retry payment for an unpaid pre-order */}
+                    {b.status === "pending_payment" && (
+                      <Button
+                        size="sm"
+                        onClick={() => handlePayNow(b)}
+                        disabled={payingCode === b.code}
+                        className="text-xs"
+                      >
+                        <CreditCard className="size-3.5 mr-1.5" />
+                        {payingCode === b.code ? "Opening payment…" : `Pay ${formatPaise(b.depositDuePaise)} now`}
+                      </Button>
+                    )}
+
                     {/* Cancel Option for Upcoming Bookings */}
-                    {isUpcoming && !isCancelled && (
+                    {isUpcoming && !isCancelled && !["no_show", "expired", "completed"].includes(b.status) && (
                       <Button
                         variant="outline"
                         size="sm"
-                        onClick={() => handleCancelBooking(b.code)}
+                        onClick={() => handleCancelBooking(b)}
                         disabled={cancellingCode === b.code}
                         className="text-xs text-destructive border-destructive/40 hover:bg-destructive/10"
                       >
