@@ -29,7 +29,16 @@ import {
   LayoutGrid,
   Radio,
   SlidersHorizontal,
+  Utensils,
+  ShoppingBag,
+  Bike,
+  MapPin,
 } from "lucide-react";
+import {
+  normalizeOrderType,
+  getOrderTypeDetails,
+  getOrderStatusLabel,
+} from "@/lib/order-types";
 import { toast } from "sonner";
 import { getCurrentKitchen, logoutKitchen, type User } from "@/lib/auth";
 import {
@@ -327,8 +336,10 @@ function KitchenDashboardPage() {
       }
 
       // 2. Order Type filter
-      if (orderTypeFilter !== "All" && order.orderType !== orderTypeFilter) {
-        return false;
+      if (orderTypeFilter !== "All") {
+        if (normalizeOrderType(order.orderType) !== normalizeOrderType(orderTypeFilter)) {
+          return false;
+        }
       }
 
       // 3. Station filter: order must have at least one item matching the station
@@ -785,10 +796,27 @@ function KitchenDashboardPage() {
                     <tr key={o.code} className="hover:bg-neutral-800/30 transition-colors">
                       <td className="py-3 px-3 font-mono font-bold text-orange-400">#{o.code}</td>
                       <td className="py-3 px-3">
-                        <span className="font-medium text-neutral-200">
-                          {o.seating ? `Table ${o.seating}` : o.tableType}
-                        </span>
-                        <span className="block text-[10px] text-neutral-500 capitalize">{o.orderType || "Dine-in"}</span>
+                        {(() => {
+                          const details = getOrderTypeDetails(o.orderType);
+                          return (
+                            <div className="space-y-1">
+                              <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold border ${details.badgeClass}`}>
+                                {details.label}
+                              </span>
+                              <div className="font-medium text-neutral-200 text-xs">
+                                {details.type === "DINE_IN" ? (
+                                  `Table ${o.tableNumber || o.seating || "Assigned"}`
+                                ) : details.type === "TAKEAWAY" ? (
+                                  `Pickup: ${o.pickupTime || "ASAP"}`
+                                ) : (
+                                  <span className="truncate max-w-[140px] block" title={o.deliveryAddress || ""}>
+                                    {o.deliveryAddress || "Delivery"}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })()}
                       </td>
                       <td className="py-3 px-3 text-neutral-300">
                         {o.name}
@@ -806,7 +834,7 @@ function KitchenDashboardPage() {
                       <td className="py-3 px-3">
                         <Badge
                           variant="outline"
-                          className={`text-[10px] uppercase font-mono px-2 py-0.5 ${
+                          className={`text-[10px] font-medium px-2 py-0.5 ${
                             o.kitchenStatus === "completed" || o.status === "completed"
                               ? "text-emerald-400 border-emerald-500/40 bg-emerald-950/40"
                               : o.kitchenStatus === "cancelled" || o.status === "cancelled"
@@ -814,7 +842,7 @@ function KitchenDashboardPage() {
                               : "text-orange-400 border-orange-500/40 bg-orange-950/40"
                           }`}
                         >
-                          {o.kitchenStatus || o.status}
+                          {getOrderStatusLabel(o.orderType, o.status, o.kitchenStatus)}
                         </Badge>
                         {o.cancellationReason && (
                           <span className="block text-[10px] text-rose-300 italic mt-0.5">
@@ -1018,6 +1046,9 @@ function KitchenDashboardPage() {
     // Distinguish veg vs non-veg
     const isVegOrder = order.dietary?.includes("Vegetarian") || order.dietary?.includes("Vegan");
 
+    const orderTypeMeta = getOrderTypeDetails(order.orderType);
+    const normType = orderTypeMeta.type;
+
     return (
       <div
         key={order.code}
@@ -1059,15 +1090,35 @@ function KitchenDashboardPage() {
                 </Badge>
               </div>
 
-              {/* Table or Order Type Badge */}
-              <div className="mt-1 flex items-center gap-1.5 text-xs text-neutral-300">
-                <span className="font-semibold text-orange-400">
-                  {order.seating ? `Table ${order.seating}` : order.tableType || "Table"}
+              {/* Order Type Badge & Destination */}
+              <div className="mt-1.5 flex items-center gap-2 flex-wrap">
+                <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold border ${orderTypeMeta.badgeClass}`}>
+                  {orderTypeMeta.iconName === "Utensils" && <Utensils className="size-3" />}
+                  {orderTypeMeta.iconName === "ShoppingBag" && <ShoppingBag className="size-3" />}
+                  {orderTypeMeta.iconName === "Bike" && <Bike className="size-3" />}
+                  {orderTypeMeta.label}
                 </span>
+
+                {normType === "DINE_IN" && (
+                  <span className="text-xs font-semibold text-orange-400 flex items-center gap-1">
+                    <Utensils className="size-3" />
+                    Table {order.tableNumber || order.seating || "Assigned"}
+                  </span>
+                )}
+                {normType === "TAKEAWAY" && (
+                  <span className="text-xs font-medium text-blue-300 flex items-center gap-1">
+                    <Clock className="size-3" />
+                    Pickup: {order.pickupTime || "ASAP"}
+                  </span>
+                )}
+                {normType === "DELIVERY" && (
+                  <span className="text-xs font-medium text-purple-300 flex items-center gap-1">
+                    <Bike className="size-3" />
+                    Delivery
+                  </span>
+                )}
                 <span className="text-neutral-500">•</span>
-                <span className="capitalize text-neutral-400">{order.orderType || "Dine-in"}</span>
-                <span className="text-neutral-500">•</span>
-                <span>{order.party}p</span>
+                <span className="text-xs text-neutral-400">{order.party || 1}p</span>
               </div>
             </div>
 
@@ -1083,9 +1134,30 @@ function KitchenDashboardPage() {
           </div>
 
           {/* Guest Name & Phone */}
-          <div className="text-[11px] text-neutral-400 mb-2.5">
+          <div className="text-[11px] text-neutral-400 mb-2">
             Guest: <strong className="text-neutral-200 font-medium">{order.name}</strong> • Time: {order.time}
+            {normType !== "DINE_IN" && (
+              <> • Phone: <strong className="text-neutral-300 font-mono">{order.customerPhone || order.phone}</strong></>
+            )}
           </div>
+
+          {/* Delivery Address & Instructions */}
+          {normType === "DELIVERY" && order.deliveryAddress && (
+            <div className="mb-2.5 p-2 rounded-xl bg-purple-950/30 border border-purple-800/40 text-purple-200 text-xs">
+              <div className="flex items-start gap-1.5">
+                <MapPin className="size-3.5 text-purple-400 shrink-0 mt-0.5" />
+                <div>
+                  <span className="font-semibold text-purple-300">Deliver to: </span>
+                  {order.deliveryAddress}
+                </div>
+              </div>
+              {order.deliveryInstructions && (
+                <div className="mt-1 pl-5 text-[11px] text-purple-300/80">
+                  Note: {order.deliveryInstructions}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Customer Special Instructions / Notes Banner */}
           {order.notes && (
@@ -1140,7 +1212,7 @@ function KitchenDashboardPage() {
                     {/* Item Image Thumbnail on KDS Card */}
                     <img
                       src={
-                        item.image ||
+                        (item as any).image ||
                         menuMap.get(item.id)?.image ||
                         liveMenu.find((m) => m.name.toLowerCase() === item.name.toLowerCase())?.image ||
                         "/uploads/menu/placeholder.webp"
@@ -1198,7 +1270,12 @@ function KitchenDashboardPage() {
                 disabled={isLoading}
                 className="flex-1 h-9 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs rounded-xl flex items-center justify-center gap-1.5 shadow-md shadow-emerald-950/40"
               >
-                <CheckCircle2 className="size-3.5" /> Mark Ready
+                <CheckCircle2 className="size-3.5" />
+                {normType === "TAKEAWAY"
+                  ? "Ready for Pickup"
+                  : normType === "DELIVERY"
+                  ? "Out for Delivery"
+                  : "Mark Ready / Plated"}
               </Button>
               <Button
                 onClick={() => setRejectingOrder(order)}
@@ -1218,13 +1295,22 @@ function KitchenDashboardPage() {
               disabled={isLoading}
               className="w-full h-9 bg-neutral-800 hover:bg-neutral-700 text-neutral-100 font-semibold text-xs rounded-xl flex items-center justify-center gap-1.5 border border-neutral-700"
             >
-              <Check className="size-3.5 text-emerald-400" /> Complete / Served
+              <Check className="size-3.5 text-emerald-400" />
+              {normType === "TAKEAWAY"
+                ? "Complete Pickup"
+                : normType === "DELIVERY"
+                ? "Mark Delivered"
+                : "Complete / Served"}
             </Button>
           )}
 
           {columnStatus === "completed" && (
             <div className="w-full text-center text-[10px] text-neutral-500 font-mono">
-              Served & Finished
+              {normType === "TAKEAWAY"
+                ? "Picked Up & Completed"
+                : normType === "DELIVERY"
+                ? "Delivered & Finished"
+                : "Served & Finished"}
             </div>
           )}
 

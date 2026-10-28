@@ -44,6 +44,15 @@ export interface Database {
           confirmed_at?: string;
           created_at: string;
           user_id?: string | null;
+          order_type?: "DINE_IN" | "TAKEAWAY" | "DELIVERY";
+          table_number?: string | null;
+          customer_name?: string | null;
+          customer_phone?: string | null;
+          delivery_address?: string | null;
+          delivery_instructions?: string | null;
+          pickup_time?: string | null;
+          delivery_fee?: number | null;
+          packaging_charge?: number | null;
         };
         Insert: {
           id?: string;
@@ -79,6 +88,15 @@ export interface Database {
           confirmed_at?: string;
           created_at?: string;
           user_id?: string | null;
+          order_type?: "DINE_IN" | "TAKEAWAY" | "DELIVERY";
+          table_number?: string | null;
+          customer_name?: string | null;
+          customer_phone?: string | null;
+          delivery_address?: string | null;
+          delivery_instructions?: string | null;
+          pickup_time?: string | null;
+          delivery_fee?: number | null;
+          packaging_charge?: number | null;
         };
         Update: {
           id?: string;
@@ -114,6 +132,15 @@ export interface Database {
           confirmed_at?: string;
           created_at?: string;
           user_id?: string | null;
+          order_type?: "DINE_IN" | "TAKEAWAY" | "DELIVERY";
+          table_number?: string | null;
+          customer_name?: string | null;
+          customer_phone?: string | null;
+          delivery_address?: string | null;
+          delivery_instructions?: string | null;
+          pickup_time?: string | null;
+          delivery_fee?: number | null;
+          packaging_charge?: number | null;
         };
       };
       users: {

@@ -47,7 +47,16 @@ import {
   Activity,
   FileText,
   Info,
+  Utensils,
+  ShoppingBag,
+  Bike,
+  MapPin,
 } from "lucide-react";
+import {
+  normalizeOrderType,
+  getOrderTypeDetails,
+  getOrderStatusLabel,
+} from "@/lib/order-types";
 import { toast } from "sonner";
 import { getDeliveryLogs, type DeliveryLogRecord } from "@/lib/notifications";
 import {
@@ -317,6 +326,7 @@ function AdminDashboardPage() {
   // Reservation Filters
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("all");
+  const [orderTypeFilter, setOrderTypeFilter] = useState<string>("all");
   const [dateFilter, setDateFilter] = useState<"all" | "today" | "upcoming">("all");
   const [actionLoadingCode, setActionLoadingCode] = useState<string | null>(null);
 
@@ -558,6 +568,13 @@ function AdminDashboardPage() {
         return false;
       }
 
+      // Order Type
+      if (orderTypeFilter !== "all") {
+        if (normalizeOrderType(b.orderType) !== normalizeOrderType(orderTypeFilter)) {
+          return false;
+        }
+      }
+
       // Date
       if (dateFilter === "today" && b.date !== todayStr) {
         return false;
@@ -568,7 +585,7 @@ function AdminDashboardPage() {
 
       return true;
     });
-  }, [bookings, searchQuery, statusFilter, dateFilter, todayStr]);
+  }, [bookings, searchQuery, statusFilter, orderTypeFilter, dateFilter, todayStr]);
 
   const filteredLogs = useMemo(() => {
     return deliveryLogs.filter((log) => {
@@ -1056,6 +1073,18 @@ function AdminDashboardPage() {
                   <option value="no_show">No-Show</option>
                 </select>
 
+                {/* Order Type filter dropdown */}
+                <select
+                  value={orderTypeFilter}
+                  onChange={(e) => setOrderTypeFilter(e.target.value)}
+                  className="rounded-xl bg-neutral-950 border border-neutral-800 text-neutral-300 text-xs px-3 py-2 focus:outline-none focus:border-amber-500"
+                >
+                  <option value="all">All Order Types</option>
+                  <option value="DINE_IN">Dine-in</option>
+                  <option value="TAKEAWAY">Takeaway</option>
+                  <option value="DELIVERY">Delivery</option>
+                </select>
+
                 <Button
                   variant="outline"
                   size="sm"
@@ -1089,7 +1118,7 @@ function AdminDashboardPage() {
                         <th className="px-5 py-3.5 font-semibold">Code / Time</th>
                         <th className="px-5 py-3.5 font-semibold">Date</th>
                         <th className="px-5 py-3.5 font-semibold">Guest</th>
-                        <th className="px-5 py-3.5 font-semibold">Table & Party</th>
+                        <th className="px-5 py-3.5 font-semibold">Type & Destination</th>
                         <th className="px-5 py-3.5 font-semibold">Pre-Order / Total</th>
                         <th className="px-5 py-3.5 font-semibold">Status</th>
                         <th className="px-5 py-3.5 font-semibold text-right">Actions</th>
@@ -1132,14 +1161,45 @@ function AdminDashboardPage() {
                               )}
                             </td>
 
-                            {/* Table & Party */}
-                            <td className="px-5 py-4 whitespace-nowrap">
-                              <Badge variant="outline" className="border-neutral-700 bg-neutral-800 text-neutral-300 text-[11px]">
-                                {tableInfo?.name || b.seating}
-                              </Badge>
-                              <div className="text-[11px] text-neutral-400 mt-1 flex items-center gap-1">
-                                <Users className="size-3 text-neutral-500" /> {b.party} {b.party === 1 ? "Guest" : "Guests"}
-                              </div>
+                            {/* Type & Destination */}
+                            <td className="px-5 py-4">
+                              {(() => {
+                                const details = getOrderTypeDetails(b.orderType);
+                                return (
+                                  <div className="space-y-1">
+                                    <div className="flex items-center gap-1.5 flex-wrap">
+                                      <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold border ${details.badgeClass}`}>
+                                        {details.iconName === "Utensils" && <Utensils className="size-3" />}
+                                        {details.iconName === "ShoppingBag" && <ShoppingBag className="size-3" />}
+                                        {details.iconName === "Bike" && <Bike className="size-3" />}
+                                        {details.label}
+                                      </span>
+                                      <span className="text-[11px] text-neutral-400">
+                                        • {b.party} {b.party === 1 ? "Guest" : "Guests"}
+                                      </span>
+                                    </div>
+                                    <div className="text-xs text-neutral-300 font-medium">
+                                      {details.type === "DINE_IN" ? (
+                                        tableInfo?.name ? `${tableInfo.name} (${b.tableNumber ? `Table ${b.tableNumber}` : b.seating || "Table"})` : `Table ${b.tableNumber || b.seating || "Assigned"}`
+                                      ) : details.type === "TAKEAWAY" ? (
+                                        <span className="text-blue-300 flex items-center gap-1 text-[11px]">
+                                          <Clock className="size-3" /> Pickup: {b.pickupTime || "ASAP"}
+                                        </span>
+                                      ) : (
+                                        <div className="text-purple-300 text-[11px] max-w-xs">
+                                          <div className="flex items-start gap-1">
+                                            <MapPin className="size-3 shrink-0 mt-0.5 text-purple-400" />
+                                            <span className="truncate" title={b.deliveryAddress || ""}>{b.deliveryAddress || "Delivery"}</span>
+                                          </div>
+                                          {b.deliveryInstructions && (
+                                            <div className="text-[10px] text-neutral-400 italic pl-4">Note: {b.deliveryInstructions}</div>
+                                          )}
+                                        </div>
+                                      )}
+                                    </div>
+                                  </div>
+                                );
+                              })()}
                             </td>
 
                             {/* Pre-Order / Total */}
@@ -1152,26 +1212,28 @@ function AdminDashboardPage() {
 
                             {/* Status Badge */}
                             <td className="px-5 py-4 whitespace-nowrap">
-                              {b.status === "confirmed" && (
-                                <Badge className="bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 text-[11px]">
-                                  Confirmed
-                                </Badge>
-                              )}
-                              {b.status === "completed" && (
-                                <Badge className="bg-blue-500/20 text-blue-400 border border-blue-500/30 text-[11px]">
-                                  Completed
-                                </Badge>
-                              )}
-                              {b.status === "cancelled" && (
-                                <Badge className="bg-red-500/20 text-red-400 border border-red-500/30 text-[11px]">
-                                  Cancelled
-                                </Badge>
-                              )}
-                              {b.status === "no_show" && (
-                                <Badge className="bg-amber-500/20 text-amber-400 border border-amber-500/30 text-[11px]">
-                                  No-Show
-                                </Badge>
-                              )}
+                              {(() => {
+                                const statusLabel = getOrderStatusLabel(b.orderType, b.status, b.kitchenStatus);
+                                const isCompleted = b.status === "completed" || b.kitchenStatus === "completed";
+                                const isCancelled = b.status === "cancelled" || b.kitchenStatus === "cancelled";
+                                const isNoShow = b.status === "no_show";
+
+                                return (
+                                  <Badge
+                                    className={`text-[11px] font-medium border ${
+                                      isCancelled
+                                        ? "bg-red-500/20 text-red-400 border-red-500/30"
+                                        : isNoShow
+                                        ? "bg-amber-500/20 text-amber-400 border-amber-500/30"
+                                        : isCompleted
+                                        ? "bg-blue-500/20 text-blue-400 border-blue-500/30"
+                                        : "bg-emerald-500/20 text-emerald-400 border-emerald-500/30"
+                                    }`}
+                                  >
+                                    {statusLabel}
+                                  </Badge>
+                                );
+                              })()}
                             </td>
 
                             {/* Actions */}
