@@ -1,6 +1,11 @@
 import { createClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 import { DEFAULT_DELIVERY_FEE, DEFAULT_PACKAGING_CHARGE } from "@/lib/order-types";
+import {
+  DEFAULT_PREORDER_SETTINGS,
+  type PreorderPaymentMode,
+  type PreorderSettings,
+} from "@/lib/prepayment";
 
 export type CafeSettings = {
   upiId: string;
@@ -9,14 +14,20 @@ export type CafeSettings = {
   deliveryFee: number;
   /** Takeaway packaging charge in ₹ (cafe_settings key: packaging_charge) */
   packagingCharge: number;
-};
+} & PreorderSettings;
 
 const DEFAULT_SETTINGS: CafeSettings = {
   upiId: "cafeq@upi",
   upiPayeeName: "Cafeq",
   deliveryFee: DEFAULT_DELIVERY_FEE,
   packagingCharge: DEFAULT_PACKAGING_CHARGE,
+  ...DEFAULT_PREORDER_SETTINGS,
 };
+
+function parseMode(raw: string | undefined): PreorderPaymentMode {
+  const mode = (raw || "").trim().toUpperCase();
+  return mode === "NONE" || mode === "DEPOSIT" || mode === "FULL" ? mode : DEFAULT_PREORDER_SETTINGS.preorderPaymentMode;
+}
 
 function parseAmount(raw: string | undefined, fallback: number): number {
   const val = Number(raw);
@@ -66,6 +77,10 @@ export async function getCafeSettings(): Promise<CafeSettings> {
       upiPayeeName: map.get("upi_payee_name") || DEFAULT_SETTINGS.upiPayeeName,
       deliveryFee: parseAmount(map.get("delivery_fee"), DEFAULT_SETTINGS.deliveryFee),
       packagingCharge: parseAmount(map.get("packaging_charge"), DEFAULT_SETTINGS.packagingCharge),
+      preorderPaymentMode: parseMode(map.get("preorder_payment_mode")),
+      depositPercent: parseAmount(map.get("deposit_percent"), DEFAULT_SETTINGS.depositPercent),
+      depositMinInr: parseAmount(map.get("deposit_min_inr"), DEFAULT_SETTINGS.depositMinInr),
+      refundCutoffMinutes: parseAmount(map.get("refund_cutoff_minutes"), DEFAULT_SETTINGS.refundCutoffMinutes),
     };
   } catch (err) {
     console.error("getCafeSettings unexpected error:", err);

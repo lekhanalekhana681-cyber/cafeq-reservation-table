@@ -45,6 +45,7 @@ import {
   Trash2,
   CheckCheck,
   Activity,
+  Wallet,
   FileText,
   Info,
   Utensils,
@@ -58,6 +59,8 @@ import {
   getOrderStatusLabel,
 } from "@/lib/order-types";
 import { formatItemProgress, ITEM_STATUS_LABELS } from "@/lib/order-items";
+import { PaymentsPanel } from "@/components/admin/PaymentsPanel";
+import { formatPaise, PAYMENT_STATE_LABELS } from "@/lib/prepayment";
 import { toast } from "sonner";
 import { getDeliveryLogs, type DeliveryLogRecord } from "@/lib/notifications";
 import {
@@ -142,20 +145,20 @@ function AdminDashboardPage() {
   const [resetStaffPasswordInput, setResetStaffPasswordInput] = useState("");
 
   const searchParams = Route.useSearch();
-  // Top-level Admin View Tab ("reservations" | "menu" | "notifications" | "logs")
-  const [activeAdminTab, setActiveAdminTab] = useState<"reservations" | "menu" | "notifications" | "logs">(
-    (["reservations", "menu", "notifications", "logs"].includes(searchParams.tab as string)
+  // Top-level Admin View Tab ("reservations" | "menu" | "notifications" | "logs" | "payments")
+  const [activeAdminTab, setActiveAdminTab] = useState<"reservations" | "menu" | "notifications" | "logs" | "payments">(
+    (["reservations", "menu", "notifications", "logs", "payments"].includes(searchParams.tab as string)
       ? (searchParams.tab as any)
       : "reservations")
   );
 
   useEffect(() => {
-    if (searchParams.tab && ["reservations", "menu", "notifications", "logs"].includes(searchParams.tab)) {
+    if (searchParams.tab && ["reservations", "menu", "notifications", "logs", "payments"].includes(searchParams.tab)) {
       setActiveAdminTab(searchParams.tab as any);
     }
   }, [searchParams.tab]);
 
-  const handleSelectAdminTab = (tab: "reservations" | "menu" | "notifications" | "logs") => {
+  const handleSelectAdminTab = (tab: "reservations" | "menu" | "notifications" | "logs" | "payments") => {
     setActiveAdminTab(tab);
     navigate({ search: { tab } });
   };
@@ -499,7 +502,11 @@ function AdminDashboardPage() {
   const handleUpdateStatus = async (code: string, newStatus: BookingStatus) => {
     setActionLoadingCode(code);
     try {
-      await updateBookingStatus({ code, status: newStatus });
+      const res = await updateBookingStatus({ code, status: newStatus });
+      if (!res.success) {
+        toast.error(res.error || "Failed to update booking status.");
+        return;
+      }
       toast.success(`Booking ${code} marked as ${newStatus}`);
       setBookings((prev) =>
         prev.map((b) => (b.code === code ? { ...b, status: newStatus } : b))
@@ -923,6 +930,18 @@ function AdminDashboardPage() {
                 {auditLogs.length}
               </span>
             </button>
+            <button
+              type="button"
+              onClick={() => handleSelectAdminTab("payments")}
+              className={`flex items-center gap-2 px-3.5 sm:px-4 py-2 rounded-xl text-xs font-semibold transition-all ${
+                activeAdminTab === "payments"
+                  ? "bg-amber-600 text-neutral-950 shadow-md font-bold"
+                  : "text-neutral-400 hover:text-white"
+              }`}
+            >
+              <Wallet className="size-4" />
+              <span>Payments</span>
+            </button>
           </div>
 
           <div className="flex items-center gap-2.5">
@@ -1243,6 +1262,14 @@ function AdminDashboardPage() {
                                   </Badge>
                                 );
                               })()}
+                              {b.paymentRequired && b.paymentState && (
+                                <div className="mt-1 text-[10px] text-neutral-400">
+                                  {PAYMENT_STATE_LABELS[b.paymentState]}
+                                  {(b.balanceDuePaise ?? 0) > 0 && !["cancelled", "no_show", "expired"].includes(b.status) && (
+                                    <> · balance {formatPaise(b.balanceDuePaise)}</>
+                                  )}
+                                </div>
+                              )}
                             </td>
 
                             {/* Actions */}
@@ -1891,6 +1918,8 @@ function AdminDashboardPage() {
         )}
 
         {/* ── Tab 4: System Activity & Audit Logs ────────────────────────────── */}
+        {activeAdminTab === "payments" && <PaymentsPanel defaultIdentifier={admin?.email} />}
+
         {activeAdminTab === "logs" && (
           <div className="space-y-6">
             {/* Header & View Mode Selector */}

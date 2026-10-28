@@ -51,6 +51,7 @@ import {
   parseTimestamp,
   type ItemStatus,
 } from "@/lib/order-items";
+import { formatPaise } from "@/lib/prepayment";
 import { toast } from "sonner";
 import { getCurrentKitchen, logoutKitchen, type User } from "@/lib/auth";
 import {
@@ -134,6 +135,8 @@ function KitchenDashboardPage() {
   // Per-item loading ("CODE:itemId") so a double tap never fires twice
   const [busyItemKeys, setBusyItemKeys] = useState<Set<string>>(() => new Set());
   const busyItemKeysRef = useRef<Set<string>>(new Set());
+  // Tickets already on the board (null until the first load, so the initial load doesn't chime)
+  const knownTicketCodesRef = useRef<Set<string> | null>(null);
   // Item awaiting cancel confirmation ("CODE:itemId")
   const [confirmCancelKey, setConfirmCancelKey] = useState<string | null>(null);
 
@@ -171,8 +174,7 @@ function KitchenDashboardPage() {
   useEffect(() => {
     const unsubscribe = subscribeToKitchenEvents((event: KitchenEventPayload) => {
       if (event.type === "NEW_ORDER") {
-        toast.info("🛎️ New order received in kitchen!", { duration: 4000 });
-        playNewOrderSound();
+        // The chime plays in loadOrders when the ticket actually appears on the board
         loadOrders(false);
       } else if (
         event.type === "ORDER_STATUS_CHANGED" ||
@@ -195,8 +197,7 @@ function KitchenDashboardPage() {
       try {
         realtimeChannel = supabase
           .channel("kds-bookings-realtime")
-          .on("postgres_changes", { event: "*", schema: "public", table: "bookings" }, (payload) => {
-            if (payload.eventType === "INSERT") playNewOrderSound();
+          .on("postgres_changes", { event: "*", schema: "public", table: "bookings" }, () => {
             loadOrders(false);
           })
           .subscribe((status) => {
@@ -218,8 +219,21 @@ function KitchenDashboardPage() {
     if (showLoadingSpinner) setLoading(true);
     try {
       const data = await getAllBookings();
-      // Filter only orders that have food/drink items (Kitchen relevant tickets)
-      const kitchenTickets = data.filter((b) => b.items && b.items.length > 0);
+      // Kitchen-relevant tickets: orders with food/drink items. Pre-orders awaiting online
+      // payment (or expired unpaid) never reach the kitchen.
+      const kitchenTickets = data.filter(
+        (b) => b.items && b.items.length > 0 && b.status !== "pending_payment" && b.status !== "expired"
+      );
+
+      // Chime for tickets that just appeared — new orders, and pre-orders whose payment
+      // was confirmed (they arrive as an update, not an insert).
+      const previous = knownTicketCodesRef.current;
+      if (previous && kitchenTickets.some((t) => t.kitchenStatus === "new" && !previous.has(t.code))) {
+        toast.info("🛎️ New order received in kitchen!", { duration: 4000 });
+        playNewOrderSound();
+      }
+      knownTicketCodesRef.current = new Set(kitchenTickets.map((t) => t.code));
+
       setOrders(kitchenTickets);
       setConnectionStatus("connected");
     } catch {
@@ -1182,6 +1196,19 @@ function KitchenDashboardPage() {
                 >
                   {isVegOrder ? "🟢 Veg" : "🟡 Standard"}
                 </Badge>
+
+                {/* Pre-order payment: deposit / fully paid, with what staff must still collect */}
+                {order.paymentRequired && (order.paymentState === "PARTIALLY_PAID" || order.paymentState === "PAID") && (
+                  <Badge
+                    variant="outline"
+                    className="text-[10px] px-1.5 py-0 font-semibold text-emerald-300 border-emerald-500/50 bg-emerald-950/50"
+                    title={`Paid online ${formatPaise(order.amountPaidPaise)} of ${formatPaise(order.totalAmountPaise)}`}
+                  >
+                    {order.paymentState === "PAID"
+                      ? "Fully paid"
+                      : `Deposit paid · Collect ${formatPaise(order.balanceDuePaise)}`}
+                  </Badge>
+                )}
               </div>
 
               {/* Order Type Badge & Destination */}

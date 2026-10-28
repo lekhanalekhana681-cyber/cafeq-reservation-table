@@ -27,6 +27,7 @@ import {
   type TicketStatus,
 } from "@/lib/order-items";
 import { getKitchenSession } from "@/lib/auth";
+import type { PaymentState } from "@/lib/prepayment";
 
 export const orderItemSchema = z.object({
   id: z.string(),
@@ -88,7 +89,8 @@ const bookingSchema = z.object({
   paymentStatus: z.enum(["pending_cash", "pending_qr", "pending_online", "paid", "failed", "refunded"]).default("pending_cash"),
   paymentReference: z.string().optional().nullable(),
   userId: z.string().optional().nullable(),
-  status: z.enum(["confirmed", "cancelled", "completed", "no_show"]).default("confirmed"),
+  // pending_payment / expired are set by the database for pre-orders awaiting online payment
+  status: z.enum(["confirmed", "cancelled", "completed", "no_show", "pending_payment", "expired"]).default("confirmed"),
   kitchenStatus: z.enum(["new", "preparing", "ready", "completed", "cancelled"]).default("new"),
   orderType: orderTypeSchema.default("DINE_IN"),
   tableNumber: z.string().max(20).optional().nullable(),
@@ -107,12 +109,24 @@ const bookingSchema = z.object({
   completedAt: z.string().nullable().optional(),
   /** When the order was placed — the KDS timer counts from here. */
   createdAt: z.string().nullable().optional(),
+  // Pre-order payment (set by the database and /api/payments only; ignored on insert)
+  paymentRequired: z.boolean().optional(),
+  paymentState: z
+    .enum(["UNPAID", "PENDING", "PARTIALLY_PAID", "PAID", "REFUNDED", "PARTIALLY_REFUNDED", "FORFEITED"])
+    .optional(),
+  totalAmountPaise: z.number().int().nullable().optional(),
+  depositDuePaise: z.number().int().optional(),
+  amountPaidPaise: z.number().int().optional(),
+  balanceDuePaise: z.number().int().nullable().optional(),
+  scheduledAt: z.string().nullable().optional(),
+  paymentExpiresAt: z.string().nullable().optional(),
+  forfeitReason: z.string().nullable().optional(),
 });
 
 import { getOutOfStockItemIds } from "@/lib/stock";
 import { getStoredMenu } from "@/lib/menu";
 
-export type BookingStatus = "confirmed" | "cancelled" | "completed" | "no_show";
+export type BookingStatus = "confirmed" | "cancelled" | "completed" | "no_show" | "pending_payment" | "expired";
 export type BookingInput = z.infer<typeof bookingSchema>;
 
 import { getSupabaseClient } from "@/integrations/supabase/client";
@@ -164,6 +178,15 @@ function mapOrderTypeFields(d: Partial<BookingRow>) {
     cancellationReason: d.cancellation_reason ?? null,
     cancelledBy: (d.cancelled_by as BookingInput["cancelledBy"]) ?? null,
     createdAt: d.created_at ?? null,
+    paymentRequired: d.payment_required ?? false,
+    paymentState: (d.payment_state as PaymentState | undefined) ?? "UNPAID",
+    totalAmountPaise: d.total_amount_paise ?? null,
+    depositDuePaise: d.deposit_due_paise ?? 0,
+    amountPaidPaise: d.amount_paid_paise ?? 0,
+    balanceDuePaise: d.balance_due_paise ?? null,
+    scheduledAt: d.scheduled_at ?? null,
+    paymentExpiresAt: d.payment_expires_at ?? null,
+    forfeitReason: d.forfeit_reason ?? null,
   };
 }
 
@@ -408,7 +431,7 @@ export async function createBooking({ data }: { data: BookingInput }) {
   }
 
   if (supabase) {
-    const { error } = await supabase.from("bookings").insert({
+    const { data: insertedRow, error } = await supabase.from("bookings").insert({
       code: validated.code,
       date: validated.date,
       time: validated.time,
@@ -447,14 +470,41 @@ export async function createBooking({ data }: { data: BookingInput }) {
       delivery_fee: validated.deliveryFee,
       packaging_charge: validated.packagingCharge,
       kitchen_status: "new",
-    });
+    }).select("status, payment_required, total_amount_paise, deposit_due_paise, payment_expires_at, scheduled_at").single();
 
     if (error) {
       console.error("createBooking error:", error);
       // 23514 = check_violation raised by the enforce_order_type_rules trigger; its message is customer-facing
+      const [dbCode, detail] = error.message.split(":");
       throw new Error(
-        error.code === "23514" ? error.message : "Could not save your reservation. Please try again."
+        error.code === "23514"
+          ? error.message
+          : dbCode === "ITEM_UNAVAILABLE"
+          ? `"${detail}" just went out of stock. Please remove it from your order.`
+          : dbCode === "UNKNOWN_MENU_ITEM"
+          ? `"${detail}" is no longer on the menu. Please remove it from your order.`
+          : "Could not save your reservation. Please try again."
       );
+    }
+
+    const inserted = insertedRow as Pick<
+      BookingRow,
+      "payment_required" | "total_amount_paise" | "deposit_due_paise" | "payment_expires_at" | "scheduled_at"
+    > | null;
+
+    // The database parked this pre-order until it is paid online: it must not reach
+    // the kitchen and the customer isn't confirmed yet (see /api/payments/*).
+    if (inserted?.payment_required) {
+      return {
+        code: validated.code,
+        requiresPayment: true as const,
+        payment: {
+          totalAmountPaise: inserted.total_amount_paise ?? 0,
+          depositDuePaise: inserted.deposit_due_paise,
+          paymentExpiresAt: inserted.payment_expires_at ?? null,
+          scheduledAt: inserted.scheduled_at ?? null,
+        },
+      };
     }
 
     // Record customer visit for analytics
@@ -729,6 +779,16 @@ export async function updateBookingPaymentStatus({
   return { success: true };
 }
 
+/** Customer-facing text for errors raised by the guard_payment_fields trigger. */
+function paymentGuardMessage(message: string): string {
+  if (message.startsWith("PAID_ORDER_USE_PAYMENTS")) {
+    return "This pre-order has been paid. Cancel it through My Bookings (refund policy applies) or Admin › Payments.";
+  }
+  if (message.startsWith("PAYMENT_REQUIRED")) return "This pre-order hasn't been paid yet.";
+  if (message.startsWith("PAYMENT_FIELDS_READ_ONLY")) return "Payment details can only be changed by the payment system.";
+  return "Could not update the booking. Please try again.";
+}
+
 export async function cancelBooking({
   code,
   userId,
@@ -748,6 +808,7 @@ export async function cancelBooking({
     const { error } = await query;
     if (error) {
       console.error("cancelBooking supabase error:", error);
+      return { success: false, error: paymentGuardMessage(error.message) };
     }
 
     const { data } = await supabase.from("bookings").select("*").eq("code", code).maybeSingle();
@@ -902,6 +963,7 @@ export async function updateBookingStatus({
     const { error } = await supabase.from("bookings").update({ status }).eq("code", code);
     if (error) {
       console.error("updateBookingStatus error:", error);
+      return { success: false, error: paymentGuardMessage(error.message) };
     }
   }
 
@@ -998,6 +1060,10 @@ async function rpcErrorToResult(code: string, error: { code?: string; message: s
   }
   if (msg.startsWith("INVALID_TRANSITION")) return { success: false, error: "That status change isn't allowed for this item." };
   if (msg.startsWith("ORDER_CANCELLED")) return { success: false, error: "This order has been cancelled." };
+  if (msg.startsWith("PAYMENT_REQUIRED")) return { success: false, error: "This pre-order hasn't been paid yet." };
+  if (msg.startsWith("PAID_ORDER_USE_PAYMENTS")) {
+    return { success: false, error: "This is a paid pre-order — cancel it from Admin › Payments so the deposit is refunded." };
+  }
   if (msg.startsWith("ORDER_NOT_FOUND") || msg.startsWith("ITEM_NOT_FOUND")) {
     return { success: false, error: "Order or item not found." };
   }

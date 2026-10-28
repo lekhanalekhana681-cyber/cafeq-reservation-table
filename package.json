@@ -11,7 +11,8 @@
     "seed:kitchen": "tsx scripts/seed-kitchen.ts",
     "seed:menu": "tsx scripts/seed-menu.ts",
     "cleanup:menu": "tsx scripts/remove-menu-items.ts",
-    "test": "tsx tests/kitchen-kds.test.ts && tsx tests/kds-items.test.ts && tsx tests/order-types.test.ts && tsx tests/payment-and-receipts.test.ts && tsx tests/notifications.test.ts",
+    "test": "tsx tests/kitchen-kds.test.ts && tsx tests/kds-items.test.ts && tsx tests/order-types.test.ts && tsx tests/preorder-payments.test.ts && tsx tests/payment-and-receipts.test.ts && tsx tests/notifications.test.ts",
+    "test:payments-preorder": "tsx tests/preorder-payments.test.ts",
     "test:kds": "tsx tests/kitchen-kds.test.ts",
     "test:kds-items": "tsx tests/kds-items.test.ts",
     "test:order-types": "tsx tests/order-types.test.ts",
@@ -78,6 +79,7 @@
     "zod": "^3.24.2"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.2.17",
     "@types/bcryptjs": "^2.4.6",
     "@types/node": "^22.13.4",
     "@types/react": "^19.0.10",
