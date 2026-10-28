@@ -223,15 +223,21 @@ async function runTests() {
   const inPrep = prepOrders.find((o) => o.code === testOrderCode);
   assert(inPrep?.kitchenStatus === "preparing" && Boolean(inPrep?.acceptedAt), "Order transitions to 'preparing' with acceptedAt timestamp");
 
-  // Step 2.2: Item-level checklist status toggle
+  // Step 2.2: One item marked ready on its own; the other keeps cooking
   await updateOrderItemStatus({
     code: testOrderCode,
     itemId: "classic-cappuccino",
-    status: "done",
+    status: "READY",
+    expectedStatus: "PREPARING",
   });
   const itemCheckedOrders = await getAllBookings();
-  const targetItem = itemCheckedOrders.find((o) => o.code === testOrderCode)?.items?.find((i) => i.id === "classic-cappuccino");
-  assert(targetItem?.status === "done", "Item status individually toggled to 'done'");
+  const checkedOrder = itemCheckedOrders.find((o) => o.code === testOrderCode);
+  const targetItem = checkedOrder?.items?.find((i) => i.id === "classic-cappuccino");
+  const otherItem = checkedOrder?.items?.find((i) => i.id === "herb-fries");
+  assert(
+    targetItem?.status === "READY" && otherItem?.status === "PREPARING" && checkedOrder?.kitchenStatus === "preparing",
+    "Single item marked READY independently while the rest of the ticket stays in prep"
+  );
 
   // Step 2.3: Mark entire order Ready
   await updateKitchenOrderStatus({

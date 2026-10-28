@@ -33,18 +33,31 @@ import {
   ShoppingBag,
   Bike,
   MapPin,
+  Loader2,
+  Play,
+  HandPlatter,
 } from "lucide-react";
 import {
   normalizeOrderType,
   getOrderTypeDetails,
   getOrderStatusLabel,
 } from "@/lib/order-types";
+import {
+  averagePrepMinutes,
+  deriveTicketStatus,
+  formatElapsed,
+  formatItemProgress,
+  isSameLocalDay,
+  parseTimestamp,
+  type ItemStatus,
+} from "@/lib/order-items";
 import { toast } from "sonner";
 import { getCurrentKitchen, logoutKitchen, type User } from "@/lib/auth";
 import {
   getAllBookings,
+  getPublicClient,
+  setOrderItemsStatus,
   updateKitchenOrderStatus,
-  updateOrderItemStatus,
   type BookingInput,
   type KitchenStatus,
   type OrderItem,
@@ -72,6 +85,17 @@ export const Route = createFileRoute("/kitchen/")({
 
 type StationFilter = "All" | "Beverages" | "Momos" | "Fast Food" | "Desserts" | "Cocktails";
 type OrderTypeFilter = "All" | "dine_in" | "takeaway" | "delivery";
+
+/** Board columns; each active column shows only the items currently in its stage. */
+type BoardColumn = "new" | "preparing" | "ready" | "completed" | "cancelled";
+const COLUMN_ITEM_STATUS: Partial<Record<BoardColumn, ItemStatus>> = {
+  new: "PENDING",
+  preparing: "PREPARING",
+  ready: "READY",
+};
+
+// Cross-device fallback refresh when Supabase Realtime is unavailable
+const KDS_POLL_INTERVAL_MS = 10000;
 
 function KitchenDashboardPage() {
   const navigate = useNavigate();
@@ -107,6 +131,11 @@ function KitchenDashboardPage() {
 
   // Action loading state
   const [actionLoadingCode, setActionLoadingCode] = useState<string | null>(null);
+  // Per-item loading ("CODE:itemId") so a double tap never fires twice
+  const [busyItemKeys, setBusyItemKeys] = useState<Set<string>>(() => new Set());
+  const busyItemKeysRef = useRef<Set<string>>(new Set());
+  // Item awaiting cancel confirmation ("CODE:itemId")
+  const [confirmCancelKey, setConfirmCancelKey] = useState<string | null>(null);
 
   // 1. Route Guard
   useEffect(() => {
@@ -156,14 +185,32 @@ function KitchenDashboardPage() {
       }
     });
 
-    // Auto-reconnect heartbeat pulse
-    const heartbeat = setInterval(() => {
-      setConnectionStatus("connected");
-    }, 5000);
+    // Cross-device sync: the event bus above only reaches tabs in this browser,
+    // so other KDS screens get changes via Supabase Realtime plus a polling fallback.
+    const poll = setInterval(() => loadOrders(false), KDS_POLL_INTERVAL_MS);
+
+    const supabase = getPublicClient();
+    let realtimeChannel: ReturnType<NonNullable<typeof supabase>["channel"]> | null = null;
+    if (supabase) {
+      try {
+        realtimeChannel = supabase
+          .channel("kds-bookings-realtime")
+          .on("postgres_changes", { event: "*", schema: "public", table: "bookings" }, (payload) => {
+            if (payload.eventType === "INSERT") playNewOrderSound();
+            loadOrders(false);
+          })
+          .subscribe((status) => {
+            setConnectionStatus(status === "SUBSCRIBED" || status === "CLOSED" ? "connected" : "reconnecting");
+          });
+      } catch (err) {
+        console.warn("Could not establish KDS realtime channel:", err);
+      }
+    }
 
     return () => {
       unsubscribe();
-      clearInterval(heartbeat);
+      clearInterval(poll);
+      if (realtimeChannel && supabase) supabase.removeChannel(realtimeChannel);
     };
   }, []);
 
@@ -242,13 +289,41 @@ function KitchenDashboardPage() {
     }
   };
 
-  const handleToggleItemDone = async (code: string, itemId: string, currentStatus?: string) => {
-    const nextStatus = currentStatus === "done" ? "pending" : "done";
+  /**
+   * Moves items (from one stage) of a ticket to `next`, optimistically.
+   * The ticket is updated on screen immediately and rolled back if the server refuses.
+   */
+  const runItemUpdate = async (order: BookingInput, itemIds: string[], from: ItemStatus, next: ItemStatus) => {
+    const keys = itemIds.map((id) => `${order.code}:${id}`);
+    // Ref, not state: two taps in the same frame must not both get through
+    if (itemIds.length === 0 || keys.some((k) => busyItemKeysRef.current.has(k))) return;
+    keys.forEach((k) => busyItemKeysRef.current.add(k));
+    setBusyItemKeys(new Set(busyItemKeysRef.current));
+    setConfirmCancelKey(null);
+
+    const ids = new Set(itemIds);
+    const optimisticItems = order.items.map((i) => (ids.has(i.id) && i.status === from ? { ...i, status: next } : i));
+    const replaceOrder = (replacement: BookingInput) =>
+      setOrders((prev) => prev.map((o) => (o.code === order.code ? replacement : o)));
+    replaceOrder({ ...order, items: optimisticItems, kitchenStatus: deriveTicketStatus(optimisticItems) });
+
     try {
-      await updateOrderItemStatus({ code, itemId, status: nextStatus });
-      await loadOrders(false);
+      const res = await setOrderItemsStatus({ code: order.code, itemIds, status: next, expectedStatus: from });
+      if (res.success && res.booking) {
+        replaceOrder(res.booking);
+      } else if (res.conflict && res.booking) {
+        replaceOrder(res.booking);
+        toast.warning(res.error);
+      } else {
+        replaceOrder(order);
+        toast.error(res.error || "Failed to update item.");
+      }
     } catch {
-      toast.error("Failed to update item status.");
+      replaceOrder(order);
+      toast.error("Failed to update item. Check the connection and try again.");
+    } finally {
+      keys.forEach((k) => busyItemKeysRef.current.delete(k));
+      setBusyItemKeys(new Set(busyItemKeysRef.current));
     }
   };
 
@@ -320,7 +395,7 @@ function KitchenDashboardPage() {
     return true;
   };
 
-  // Filtered orders list
+  // Ticket-level filters: search and order type. Station filtering is per item (stationItems).
   const filteredOrders = useMemo(() => {
     return orders.filter((order) => {
       // 1. Search Query
@@ -331,6 +406,7 @@ function KitchenDashboardPage() {
           order.name.toLowerCase().includes(q) ||
           order.phone.includes(q) ||
           (order.seating && order.seating.toLowerCase().includes(q)) ||
+          (order.tableNumber && order.tableNumber.toLowerCase().includes(q)) ||
           order.items?.some((i) => i.name.toLowerCase().includes(q));
         if (!matchesQuery) return false;
       }
@@ -342,7 +418,7 @@ function KitchenDashboardPage() {
         }
       }
 
-      // 3. Station filter: order must have at least one item matching the station
+      // 3. Station filter: order must have at least one item for this station
       if (stationFilter !== "All") {
         const hasStationItem = order.items?.some((item) => matchesStation(item, stationFilter));
         if (!hasStationItem) return false;
@@ -352,57 +428,56 @@ function KitchenDashboardPage() {
     });
   }, [orders, searchQuery, orderTypeFilter, stationFilter]);
 
-  // Orders by column
-  const newOrders = useMemo(
-    () => filteredOrders.filter((o) => (o.kitchenStatus || "new") === "new" && o.status !== "cancelled"),
-    [filteredOrders]
-  );
-  const preparingOrders = useMemo(
-    () => filteredOrders.filter((o) => o.kitchenStatus === "preparing" && o.status !== "cancelled"),
-    [filteredOrders]
-  );
-  const readyOrders = useMemo(
-    () => filteredOrders.filter((o) => o.kitchenStatus === "ready" && o.status !== "cancelled"),
-    [filteredOrders]
-  );
+  /** The items of a ticket that the selected station handles (stations only see their own items). */
+  const stationItems = (order: BookingInput): OrderItem[] =>
+    stationFilter === "All" ? order.items || [] : (order.items || []).filter((i) => matchesStation(i, stationFilter));
+
+  const isClosedTicket = (o: BookingInput) => o.kitchenStatus === "completed" || o.kitchenStatus === "cancelled";
+
+  // Active columns: a ticket appears in every column holding at least one of its items,
+  // so a ticket with mixed item stages is split across columns under the same ticket ID.
+  const ticketsByStage = useMemo(() => {
+    const inStage = (status: ItemStatus) =>
+      filteredOrders.filter((o) => !isClosedTicket(o) && stationItems(o).some((i) => i.status === status));
+    return { new: inStage("PENDING"), preparing: inStage("PREPARING"), ready: inStage("READY") };
+  }, [filteredOrders, stationFilter]);
+  const newOrders = ticketsByStage.new;
+  const preparingOrders = ticketsByStage.preparing;
+  const readyOrders = ticketsByStage.ready;
+
+  const byLatest = (field: "completedAt" | "createdAt") => (a: BookingInput, b: BookingInput) =>
+    (parseTimestamp(b[field]) ?? 0) - (parseTimestamp(a[field]) ?? 0);
   const completedOrders = useMemo(
-    () => filteredOrders.filter((o) => o.kitchenStatus === "completed" || o.status === "completed"),
+    () => filteredOrders.filter((o) => o.kitchenStatus === "completed").sort(byLatest("completedAt")),
     [filteredOrders]
   );
   const cancelledOrders = useMemo(
-    () => filteredOrders.filter((o) => o.kitchenStatus === "cancelled" || o.status === "cancelled"),
+    () => filteredOrders.filter((o) => o.kitchenStatus === "cancelled").sort(byLatest("createdAt")),
     [filteredOrders]
   );
 
-  // Top KPI calculations
-  const activeQueueCount = newOrders.length + preparingOrders.length;
-  const readyCount = readyOrders.length;
+  // Top KPI calculations — item-based and scoped to the active filters/station
+  const todayKey = new Date(now).toDateString();
+  const kpis = useMemo(() => {
+    const activeItems = filteredOrders.filter((o) => !isClosedTicket(o)).flatMap(stationItems);
+    const readiedToday = filteredOrders
+      .flatMap(stationItems)
+      .filter((i) => isSameLocalDay(parseTimestamp(i.readyAt), Date.now()));
+    return {
+      activeQueue: activeItems.filter((i) => i.status === "PENDING" || i.status === "PREPARING").length,
+      readyForTable: activeItems.filter((i) => i.status === "READY").length,
+      avgPrepMinutes: averagePrepMinutes(readiedToday),
+      completedToday: completedOrders.filter((o) => isSameLocalDay(parseTimestamp(o.completedAt), Date.now())).length,
+    };
+  }, [filteredOrders, completedOrders, stationFilter, todayKey]);
 
-  const averagePrepTimeToday = useMemo(() => {
-    const finished = orders.filter((o) => o.kitchenStatus === "completed" || o.status === "completed");
-    if (finished.length === 0) return 12; // default avg prep
-    const totalMins = finished.reduce((acc, curr) => {
-      if (curr.acceptedAt && curr.completedAt) {
-        const diffMs = new Date(curr.completedAt).getTime() - new Date(curr.acceptedAt).getTime();
-        return acc + Math.max(1, Math.round(diffMs / 60000));
-      }
-      return acc + (curr.estimatedPrepTime || 12);
-    }, 0);
-    return Math.round(totalMins / finished.length);
-  }, [orders]);
-
-  // Compute timer info for a ticket
+  // Elapsed time since the order was placed. Never derived from the reservation's
+  // date/time, which can be days away from when the kitchen actually received it.
   const getTicketTimer = (order: BookingInput) => {
-    // Reference time: acceptedAt or booking date+time or booking creation
-    let startTime = now;
-    if (order.acceptedAt) {
-      startTime = new Date(order.acceptedAt).getTime();
-    } else if (order.date && order.time) {
-      const dt = new Date(`${order.date}T${order.time.includes(":") ? order.time : "10:00"}`).getTime();
-      if (!isNaN(dt)) startTime = dt;
-    }
+    const startMs = parseTimestamp(order.createdAt) ?? parseTimestamp(order.acceptedAt);
+    if (startMs === null) return null;
 
-    const elapsedSeconds = Math.max(0, Math.floor((now - startTime) / 1000));
+    const elapsedSeconds = Math.max(0, Math.floor((now - startMs) / 1000));
     const targetSeconds = (order.estimatedPrepTime || prepThresholdMinutes) * 60;
 
     const percentElapsed = targetSeconds > 0 ? (elapsedSeconds / targetSeconds) * 100 : 0;
@@ -415,12 +490,8 @@ function KitchenDashboardPage() {
       timerColor = "text-rose-400 bg-rose-950/80 border-rose-500/60 animate-pulse";
     }
 
-    const mins = Math.floor(elapsedSeconds / 60);
-    const secs = elapsedSeconds % 60;
-    const formatted = `${mins}:${secs < 10 ? "0" : ""}${secs}`;
-
     return {
-      formatted,
+      formatted: formatElapsed(elapsedSeconds),
       elapsedSeconds,
       targetSeconds,
       percentElapsed,
@@ -536,24 +607,28 @@ function KitchenDashboardPage() {
             <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-orange-500/10 border border-orange-500/30 text-orange-300">
               <Flame className="size-4 text-orange-400" />
               <span>Active Queue:</span>
-              <strong className="text-base text-orange-100 font-mono font-bold">{activeQueueCount}</strong>
+              <strong className="text-base text-orange-100 font-mono font-bold">{kpis.activeQueue}</strong>
+              <span className="text-[10px] text-orange-300/70">items</span>
             </div>
 
             <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300">
               <CheckCircle2 className="size-4 text-emerald-400" />
               <span>Ready for Table:</span>
-              <strong className="text-base text-emerald-100 font-mono font-bold">{readyCount}</strong>
+              <strong className="text-base text-emerald-100 font-mono font-bold">{kpis.readyForTable}</strong>
+              <span className="text-[10px] text-emerald-300/70">items</span>
             </div>
 
             <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-neutral-800/80 border border-neutral-700/60 text-neutral-300">
               <Clock className="size-4 text-neutral-400" />
               <span>Avg Prep Time Today:</span>
-              <strong className="text-sm text-neutral-100 font-mono font-semibold">~{averagePrepTimeToday} mins</strong>
+              <strong className="text-sm text-neutral-100 font-mono font-semibold">
+                {kpis.avgPrepMinutes === null ? "—" : `~${kpis.avgPrepMinutes} mins`}
+              </strong>
             </div>
 
             <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-neutral-800/80 border border-neutral-700/60 text-neutral-300">
               <span>Completed Today:</span>
-              <strong className="text-sm text-neutral-100 font-mono font-semibold">{completedOrders.length}</strong>
+              <strong className="text-sm text-neutral-100 font-mono font-semibold">{kpis.completedToday}</strong>
             </div>
           </div>
 
@@ -706,7 +781,7 @@ function KitchenDashboardPage() {
                   <div className="h-64 flex flex-col items-center justify-center text-center p-4 text-neutral-500">
                     <UtensilsCrossed className="size-8 stroke-1 text-neutral-600 mb-2" />
                     <p className="text-xs">Kitchen cooking queue is clear</p>
-                    <p className="text-[10px] text-neutral-600">Accept a new ticket to start preparation</p>
+                    <p className="text-[10px] text-neutral-600">Start an item from New Tickets to begin preparation</p>
                   </div>
                 ) : (
                   preparingOrders.map((order) => renderOrderCard(order, "preparing"))
@@ -825,8 +900,14 @@ function KitchenDashboardPage() {
                       <td className="py-3 px-3">
                         <div className="max-w-xs space-y-0.5">
                           {o.items?.map((it, idx) => (
-                            <span key={idx} className="inline-block mr-2 text-[11px] text-neutral-300">
-                              {it.qty}x {it.name}
+                            <span
+                              key={idx}
+                              className={`inline-block mr-2 text-[11px] ${
+                                it.status === "CANCELLED" ? "text-neutral-500 line-through" : "text-neutral-300"
+                              }`}
+                            >
+                              {it.qty}x {it.name}{" "}
+                              <span className="text-[9px] font-mono uppercase text-neutral-500">{it.status.toLowerCase()}</span>
                             </span>
                           ))}
                         </div>
@@ -844,6 +925,7 @@ function KitchenDashboardPage() {
                         >
                           {getOrderStatusLabel(o.orderType, o.status, o.kitchenStatus)}
                         </Badge>
+                        <span className="block text-[10px] text-neutral-500 mt-0.5">{formatItemProgress(o.items || [])}</span>
                         {o.cancellationReason && (
                           <span className="block text-[10px] text-rose-300 italic mt-0.5">
                             Reason: {o.cancellationReason}
@@ -1037,11 +1119,20 @@ function KitchenDashboardPage() {
   );
 
   /**
-   * Helper function to render a ticket card
+   * Helper function to render a ticket card.
+   * In the three active columns the card shows the full ticket header but only the
+   * items currently in that column's stage; each item moves on its own.
    */
-  function renderOrderCard(order: BookingInput, columnStatus: KitchenStatus) {
+  function renderOrderCard(order: BookingInput, columnStatus: BoardColumn) {
     const timer = getTicketTimer(order);
     const isLoading = actionLoadingCode === order.code;
+    const stageStatus = COLUMN_ITEM_STATUS[columnStatus];
+    const ownItems = stationItems(order);
+    const columnItems = stageStatus ? ownItems.filter((i) => i.status === stageStatus) : ownItems;
+    const otherStageCount = stageStatus
+      ? ownItems.filter((i) => i.status !== stageStatus && i.status !== "CANCELLED").length
+      : 0;
+    const columnItemsBusy = columnItems.some((i) => busyItemKeys.has(`${order.code}:${i.id}`));
 
     // Distinguish veg vs non-veg
     const isVegOrder = order.dietary?.includes("Vegetarian") || order.dietary?.includes("Vegan");
@@ -1049,9 +1140,12 @@ function KitchenDashboardPage() {
     const orderTypeMeta = getOrderTypeDetails(order.orderType);
     const normType = orderTypeMeta.type;
 
+    const readyLabel = normType === "TAKEAWAY" ? "Ready" : normType === "DELIVERY" ? "Packed" : "Ready";
+    const serveLabel = normType === "TAKEAWAY" ? "Picked up" : normType === "DELIVERY" ? "Dispatched" : "Served";
+
     return (
       <div
-        key={order.code}
+        key={`${order.code}-${columnStatus}`}
         className={`rounded-2xl border p-4 shadow-lg transition-all duration-300 relative flex flex-col justify-between ${
           columnStatus === "new"
             ? "bg-neutral-900 border-blue-500/50 shadow-blue-950/30"
@@ -1065,13 +1159,13 @@ function KitchenDashboardPage() {
         {/* Top Card Row */}
         <div>
           <div className="flex items-start justify-between gap-2 mb-2">
-            <div>
+            <div className="min-w-0">
               <div className="flex items-center gap-1.5 flex-wrap">
                 <span className="font-mono font-bold text-base text-neutral-100 tracking-tight">
                   #{order.code}
                 </span>
 
-                {columnStatus === "new" && (
+                {columnStatus === "new" && order.kitchenStatus === "new" && (
                   <Badge className="bg-blue-500 text-white font-bold text-[10px] uppercase px-1.5 py-0.2 animate-bounce">
                     NEW
                   </Badge>
@@ -1122,9 +1216,9 @@ function KitchenDashboardPage() {
               </div>
             </div>
 
-            {/* Live Running Prep Timer */}
-            {columnStatus !== "completed" && columnStatus !== "cancelled" && (
-              <div className={`px-2.5 py-1 rounded-xl border text-right font-mono ${timer.timerColor}`}>
+            {/* Live Running Timer (since the order was placed) */}
+            {timer && columnStatus !== "completed" && columnStatus !== "cancelled" && (
+              <div className={`px-2.5 py-1 rounded-xl border text-right font-mono shrink-0 ${timer.timerColor}`}>
                 <div className="text-sm font-bold leading-tight">{timer.formatted}</div>
                 <div className="text-[9px] uppercase tracking-wider opacity-80">
                   {timer.isOverdue ? "OVERDUE" : `Est: ${order.estimatedPrepTime || prepThresholdMinutes}m`}
@@ -1171,7 +1265,7 @@ function KitchenDashboardPage() {
           )}
 
           {/* Cancellation reason if cancelled */}
-          {order.cancellationReason && (
+          {order.cancellationReason && order.kitchenStatus === "cancelled" && (
             <div className="mb-3 p-2 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs flex items-start gap-1.5">
               <Ban className="size-3.5 text-rose-400 shrink-0 mt-0.5" />
               <div>
@@ -1181,126 +1275,52 @@ function KitchenDashboardPage() {
             </div>
           )}
 
-          {/* Items List with Interactive Checkbox Check-off */}
-          <div className="space-y-1.5 my-3 pt-2 border-t border-neutral-800/80">
-            {order.items?.map((item) => {
-              const isItemDone = item.status === "done" || columnStatus === "ready" || columnStatus === "completed";
-              return (
-                <div
-                  key={item.id}
-                  onClick={() => {
-                    if (columnStatus === "preparing" || columnStatus === "new") {
-                      handleToggleItemDone(order.code, item.id, item.status);
-                    }
-                  }}
-                  className={`flex items-center justify-between p-2 rounded-xl border text-xs transition-colors cursor-pointer ${
-                    isItemDone
-                      ? "bg-neutral-950/40 border-neutral-800/60 opacity-60 text-neutral-400"
-                      : "bg-neutral-800/40 border-neutral-700/60 text-neutral-100 hover:bg-neutral-800"
-                  }`}
-                >
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    <div
-                      className={`size-4 rounded-md border flex items-center justify-center shrink-0 transition-colors ${
-                        isItemDone
-                          ? "bg-emerald-600 border-emerald-500 text-white"
-                          : "border-neutral-600 bg-neutral-900"
-                      }`}
-                    >
-                      {isItemDone && <Check className="size-3 stroke-[3]" />}
-                    </div>
-                    {/* Item Image Thumbnail on KDS Card */}
-                    <img
-                      src={
-                        (item as any).image ||
-                        menuMap.get(item.id)?.image ||
-                        liveMenu.find((m) => m.name.toLowerCase() === item.name.toLowerCase())?.image ||
-                        "/uploads/menu/placeholder.webp"
-                      }
-                      alt={item.name}
-                      onError={(e) => {
-                        e.currentTarget.src = "/uploads/menu/placeholder.webp";
-                      }}
-                      className="size-8 rounded-lg object-cover shrink-0 border border-neutral-700 bg-neutral-900"
-                    />
-                    <div className="min-w-0">
-                      <span className={`font-medium block truncate ${isItemDone ? "line-through opacity-60" : ""}`}>
-                        <strong className="text-orange-400 font-mono mr-1.5">{item.qty}x</strong>
-                        {item.name}
-                      </span>
-                    </div>
-                  </div>
+          {/* Ticket progress across all stages */}
+          <div className="flex items-center justify-between text-[10px] text-neutral-500 font-mono">
+            <span>{formatItemProgress(order.items || [])}</span>
+            {otherStageCount > 0 && <span>+{otherStageCount} in other stages</span>}
+          </div>
 
-                  <span className="text-[10px] text-neutral-500 font-mono">
-                    ~{item.prepTimeMinutes || 5}m
-                  </span>
-                </div>
-              );
-            })}
+          {/* Items in this stage — each one moves on its own */}
+          <div className="space-y-1.5 my-2 pt-2 border-t border-neutral-800/80">
+            {columnItems.map((item) => renderItemRow(order, item, columnStatus))}
           </div>
         </div>
 
-        {/* ─── One-Tap Action Buttons ─── */}
+        {/* ─── Ticket-level Actions ─── */}
         <div className="mt-3 pt-2.5 border-t border-neutral-800 flex items-center gap-2">
           {columnStatus === "new" && (
-            <>
-              <Button
-                onClick={() => handleUpdateStatus(order.code, "preparing")}
-                disabled={isLoading}
-                className="flex-1 h-9 bg-orange-600 hover:bg-orange-500 text-white font-semibold text-xs rounded-xl flex items-center justify-center gap-1.5 shadow-md shadow-orange-950/40"
-              >
-                <Flame className="size-3.5" /> Accept & Prep
-              </Button>
-              <Button
-                onClick={() => setRejectingOrder(order)}
-                disabled={isLoading}
-                variant="outline"
-                className="h-9 px-3 text-xs border-neutral-700 text-neutral-400 hover:text-rose-400 hover:bg-rose-950/20 rounded-xl"
-                title="Reject order"
-              >
-                <Ban className="size-3.5" />
-              </Button>
-            </>
-          )}
-
-          {columnStatus === "preparing" && (
-            <>
-              <Button
-                onClick={() => handleUpdateStatus(order.code, "ready")}
-                disabled={isLoading}
-                className="flex-1 h-9 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs rounded-xl flex items-center justify-center gap-1.5 shadow-md shadow-emerald-950/40"
-              >
-                <CheckCircle2 className="size-3.5" />
-                {normType === "TAKEAWAY"
-                  ? "Ready for Pickup"
-                  : normType === "DELIVERY"
-                  ? "Out for Delivery"
-                  : "Mark Ready / Plated"}
-              </Button>
-              <Button
-                onClick={() => setRejectingOrder(order)}
-                disabled={isLoading}
-                variant="outline"
-                className="h-9 px-2.5 text-xs border-neutral-700 text-neutral-400 hover:text-rose-400 hover:bg-rose-950/20 rounded-xl"
-                title="Cancel ticket"
-              >
-                <Ban className="size-3.5" />
-              </Button>
-            </>
+            <Button
+              onClick={() => runItemUpdate(order, columnItems.map((i) => i.id), "PENDING", "PREPARING")}
+              disabled={columnItemsBusy || columnItems.length === 0}
+              className="flex-1 h-9 bg-orange-600 hover:bg-orange-500 text-white font-semibold text-xs rounded-xl flex items-center justify-center gap-1.5 shadow-md shadow-orange-950/40"
+            >
+              <Flame className="size-3.5" /> Start All ({columnItems.length})
+            </Button>
           )}
 
           {columnStatus === "ready" && (
             <Button
-              onClick={() => handleUpdateStatus(order.code, "completed")}
-              disabled={isLoading}
-              className="w-full h-9 bg-neutral-800 hover:bg-neutral-700 text-neutral-100 font-semibold text-xs rounded-xl flex items-center justify-center gap-1.5 border border-neutral-700"
+              onClick={() => runItemUpdate(order, columnItems.map((i) => i.id), "READY", "SERVED")}
+              disabled={columnItemsBusy || columnItems.length === 0}
+              className="flex-1 h-9 bg-neutral-800 hover:bg-neutral-700 text-neutral-100 font-semibold text-xs rounded-xl flex items-center justify-center gap-1.5 border border-neutral-700"
             >
-              <Check className="size-3.5 text-emerald-400" />
-              {normType === "TAKEAWAY"
-                ? "Complete Pickup"
-                : normType === "DELIVERY"
-                ? "Mark Delivered"
-                : "Complete / Served"}
+              <Check className="size-3.5 text-emerald-400" /> {serveLabel} All ({columnItems.length})
+            </Button>
+          )}
+
+          {(columnStatus === "new" || columnStatus === "preparing") && (
+            <Button
+              onClick={() => setRejectingOrder(order)}
+              disabled={isLoading}
+              variant="outline"
+              className={`h-9 px-3 text-xs border-neutral-700 text-neutral-400 hover:text-rose-400 hover:bg-rose-950/20 rounded-xl ${
+                columnStatus === "preparing" ? "ml-auto" : ""
+              }`}
+              title="Reject / cancel the whole ticket"
+            >
+              <Ban className="size-3.5" />
+              {columnStatus === "preparing" && <span className="ml-1">Cancel Ticket</span>}
             </Button>
           )}
 
@@ -1322,5 +1342,143 @@ function KitchenDashboardPage() {
         </div>
       </div>
     );
+
+    function renderItemRow(o: BookingInput, item: OrderItem, column: BoardColumn) {
+      const key = `${o.code}:${item.id}`;
+      const busy = busyItemKeys.has(key);
+      const confirming = confirmCancelKey === key;
+      const is86 = stockItemIds.includes(item.id) && (item.status === "PENDING" || item.status === "PREPARING");
+      const finished = item.status === "SERVED" || item.status === "CANCELLED";
+
+      // The checkbox mirrors the real item status and advances it one stage
+      const action =
+        item.status === "PENDING"
+          ? { label: "Start", next: "PREPARING" as const, icon: <Play className="size-3" />, cls: "bg-orange-600 hover:bg-orange-500" }
+          : item.status === "PREPARING"
+          ? { label: `Mark ${readyLabel}`, next: "READY" as const, icon: <CheckCircle2 className="size-3" />, cls: "bg-emerald-600 hover:bg-emerald-500" }
+          : item.status === "READY"
+          ? { label: serveLabel, next: "SERVED" as const, icon: <HandPlatter className="size-3" />, cls: "bg-neutral-700 hover:bg-neutral-600" }
+          : null;
+      const advance = () => action && runItemUpdate(o, [item.id], item.status, action.next);
+
+      return (
+        <div
+          key={item.id}
+          className={`rounded-xl border text-xs transition-colors ${
+            finished
+              ? "bg-neutral-950/40 border-neutral-800/60 text-neutral-400"
+              : is86
+              ? "bg-rose-950/20 border-rose-800/50 text-neutral-100"
+              : "bg-neutral-800/40 border-neutral-700/60 text-neutral-100"
+          }`}
+        >
+          <div className="flex items-center justify-between gap-2 p-2">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <button
+                type="button"
+                role="checkbox"
+                aria-checked={item.status === "READY" || item.status === "SERVED" ? true : item.status === "PREPARING" ? "mixed" : false}
+                aria-label={action ? `${action.label}: ${item.name}` : item.name}
+                disabled={!action || busy}
+                onClick={advance}
+                className={`size-6 rounded-md border flex items-center justify-center shrink-0 transition-colors disabled:cursor-default ${
+                  item.status === "READY" || item.status === "SERVED"
+                    ? "bg-emerald-600 border-emerald-500 text-white"
+                    : item.status === "PREPARING"
+                    ? "bg-orange-600/30 border-orange-500 text-orange-300"
+                    : item.status === "CANCELLED"
+                    ? "bg-rose-950 border-rose-700 text-rose-400"
+                    : "border-neutral-600 bg-neutral-900 hover:border-orange-500"
+                }`}
+              >
+                {busy ? (
+                  <Loader2 className="size-3.5 animate-spin" />
+                ) : item.status === "READY" || item.status === "SERVED" ? (
+                  <Check className="size-3.5 stroke-[3]" />
+                ) : item.status === "PREPARING" ? (
+                  <Flame className="size-3.5" />
+                ) : item.status === "CANCELLED" ? (
+                  <X className="size-3.5" />
+                ) : null}
+              </button>
+              {/* Item Image Thumbnail on KDS Card */}
+              <img
+                src={
+                  (item as any).image ||
+                  menuMap.get(item.id)?.image ||
+                  liveMenu.find((m) => m.name.toLowerCase() === item.name.toLowerCase())?.image ||
+                  "/uploads/menu/placeholder.webp"
+                }
+                alt={item.name}
+                onError={(e) => {
+                  e.currentTarget.src = "/uploads/menu/placeholder.webp";
+                }}
+                className="size-8 rounded-lg object-cover shrink-0 border border-neutral-700 bg-neutral-900"
+              />
+              <div className="min-w-0">
+                <span className={`font-medium block truncate ${finished ? "line-through opacity-60" : ""}`}>
+                  <strong className="text-orange-400 font-mono mr-1.5">{item.qty}x</strong>
+                  {item.name}
+                </span>
+                <span className="text-[10px] text-neutral-500 font-mono">
+                  ~{item.prepTimeMinutes || 5}m
+                  {is86 && <span className="ml-1.5 text-rose-400 font-semibold">86'd — out of stock</span>}
+                  {column === "completed" && item.status === "CANCELLED" && <span className="ml-1.5 text-rose-400">cancelled</span>}
+                </span>
+              </div>
+            </div>
+
+            {action && (
+              <div className="flex items-center gap-1 shrink-0">
+                <Button
+                  onClick={advance}
+                  disabled={busy}
+                  size="sm"
+                  className={`h-8 px-2.5 text-[11px] font-semibold text-white rounded-lg gap-1 ${action.cls}`}
+                >
+                  {busy ? <Loader2 className="size-3 animate-spin" /> : action.icon}
+                  {action.label}
+                </Button>
+                <Button
+                  onClick={() => setConfirmCancelKey(confirming ? null : key)}
+                  disabled={busy}
+                  size="sm"
+                  variant="ghost"
+                  className="h-8 w-8 p-0 text-neutral-500 hover:text-rose-400 hover:bg-rose-950/30 rounded-lg"
+                  title="Cancel this item"
+                  aria-label={`Cancel ${item.name}`}
+                >
+                  <X className="size-3.5" />
+                </Button>
+              </div>
+            )}
+          </div>
+
+          {confirming && (
+            <div className="flex items-center justify-between gap-2 px-2 pb-2 text-[11px] text-rose-200">
+              <span>Cancel {item.qty}x {item.name}?</span>
+              <div className="flex gap-1">
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => setConfirmCancelKey(null)}
+                  className="h-7 px-2 text-[11px] text-neutral-400"
+                >
+                  Keep
+                </Button>
+                <Button
+                  size="sm"
+                  variant="destructive"
+                  onClick={() => runItemUpdate(o, [item.id], item.status, "CANCELLED")}
+                  className="h-7 px-2 text-[11px]"
+                >
+                  Cancel item
+                </Button>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
   }
 }

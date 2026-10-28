@@ -24,7 +24,14 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { useAuth } from "@/context/AuthContext";
-import { getUserBookings, cancelBooking, type BookingInput } from "@/lib/bookings.functions";
+import { getUserBookings, cancelBooking, withKitchenState, type BookingInput } from "@/lib/bookings.functions";
+import {
+  formatItemProgress,
+  getItemProgress,
+  ITEM_STATUS_BADGE_CLASS,
+  ITEM_STATUS_LABELS,
+} from "@/lib/order-items";
+import { subscribeToKitchenEvents } from "@/lib/kitchen.sync";
 import {
   getReceiptByBookingCode,
   downloadReceiptPdf,
@@ -165,8 +172,8 @@ function HistoryPage() {
     }
   };
 
-  const fetchBookings = async (customPhone?: string) => {
-    setLoading(true);
+  const fetchBookings = async (customPhone?: string, silent = false) => {
+    if (!silent) setLoading(true);
     try {
       if (user) {
         const results = await getUserBookings({
@@ -180,13 +187,13 @@ function HistoryPage() {
         setBookings(results);
       } else {
         // Fallback to local storage
-        const stored = JSON.parse(localStorage.getItem("cafeq_bookings") || "[]");
-        setBookings(stored.reverse());
+        const stored: BookingInput[] = JSON.parse(localStorage.getItem("cafeq_bookings") || "[]");
+        setBookings(stored.reverse().map(withKitchenState));
       }
     } catch {
-      toast.error("Could not retrieve bookings.");
+      if (!silent) toast.error("Could not retrieve bookings.");
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   };
 
@@ -194,6 +201,20 @@ function HistoryPage() {
     if (!authLoading) {
       fetchBookings();
     }
+  }, [user, authLoading, search.phone]);
+
+  // Live order tracking: refresh item progress when the kitchen updates an order
+  useEffect(() => {
+    if (authLoading) return;
+    const refresh = () => fetchBookings(undefined, true);
+    const unsubscribe = subscribeToKitchenEvents((event) => {
+      if (event.type !== "STOCK_CHANGED") refresh();
+    });
+    const poll = setInterval(refresh, 15000);
+    return () => {
+      unsubscribe();
+      clearInterval(poll);
+    };
   }, [user, authLoading, search.phone]);
 
   const handleSearch = (e: React.FormEvent) => {
@@ -563,31 +584,64 @@ function HistoryPage() {
                 {/* Items breakdown */}
                 {b.items && b.items.length > 0 && (
                   <div className="mt-5 space-y-3">
-                    <p className="text-xs font-semibold text-foreground uppercase tracking-wider">
-                      Pre-Ordered Menu Items:
-                    </p>
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <p className="text-xs font-semibold text-foreground uppercase tracking-wider">
+                        Pre-Ordered Menu Items:
+                      </p>
+                      {!isCancelled && (
+                        <span className="text-xs font-medium text-muted-foreground">{formatItemProgress(b.items)}</span>
+                      )}
+                    </div>
+
+                    {/* Kitchen progress: share of live items that are ready or served */}
+                    {!isCancelled && (() => {
+                      const p = getItemProgress(b.items);
+                      const pct = p.total > 0 ? Math.round(((p.ready + p.served) / p.total) * 100) : 0;
+                      return (
+                        <div
+                          className="h-1.5 w-full rounded-full bg-secondary overflow-hidden"
+                          role="progressbar"
+                          aria-valuenow={pct}
+                          aria-valuemin={0}
+                          aria-valuemax={100}
+                          aria-label="Kitchen progress"
+                        >
+                          <div className="h-full bg-accent transition-all" style={{ width: `${pct}%` }} />
+                        </div>
+                      );
+                    })()}
 
                     <div className="grid gap-2 sm:grid-cols-2">
                       {preOrdered.map((it) => (
                         <div
                           key={it.id}
-                          className="flex items-center justify-between rounded-xl bg-secondary/50 px-3.5 py-2 text-xs"
+                          className="flex items-center justify-between gap-2 rounded-xl bg-secondary/50 px-3.5 py-2 text-xs"
                         >
-                          <span className="font-medium text-foreground">
+                          <span className="font-medium text-foreground min-w-0 truncate">
                             {it.qty ?? 1} × {it.name || it.id}
                           </span>
-                          <span className="text-accent font-semibold">₹{(it.price ?? 0) * (it.qty ?? 1)}</span>
+                          <span className="flex items-center gap-2 shrink-0">
+                            <span className={`rounded-md border px-1.5 py-0.5 text-[10px] font-semibold ${ITEM_STATUS_BADGE_CLASS[it.status]}`}>
+                              {ITEM_STATUS_LABELS[it.status]}
+                            </span>
+                            <span className="text-accent font-semibold">₹{(it.price ?? 0) * (it.qty ?? 1)}</span>
+                          </span>
                         </div>
                       ))}
                       {atTable.map((it) => (
                         <div
                           key={it.id}
-                          className="flex items-center justify-between rounded-xl bg-secondary/20 border border-border/50 px-3.5 py-2 text-xs"
+                          className="flex items-center justify-between gap-2 rounded-xl bg-secondary/20 border border-border/50 px-3.5 py-2 text-xs"
                         >
-                          <span className="text-muted-foreground">
+                          <span className="text-muted-foreground min-w-0 truncate">
                             {it.qty ?? 1} × {it.name || it.id} (At Table)
                           </span>
-                          <span className="text-muted-foreground">₹{(it.price ?? 0) * (it.qty ?? 1)}</span>
+                          <span className="flex items-center gap-2 shrink-0">
+                            <span className={`rounded-md border px-1.5 py-0.5 text-[10px] font-semibold ${ITEM_STATUS_BADGE_CLASS[it.status]}`}>
+                              {ITEM_STATUS_LABELS[it.status]}
+                            </span>
+                            <span className="text-muted-foreground">₹{(it.price ?? 0) * (it.qty ?? 1)}</span>
+                          </span>
                         </div>
                       ))}
                     </div>

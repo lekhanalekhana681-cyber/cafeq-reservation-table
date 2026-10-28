@@ -57,6 +57,7 @@ import {
   getOrderTypeDetails,
   getOrderStatusLabel,
 } from "@/lib/order-types";
+import { formatItemProgress, ITEM_STATUS_LABELS } from "@/lib/order-items";
 import { toast } from "sonner";
 import { getDeliveryLogs, type DeliveryLogRecord } from "@/lib/notifications";
 import {
@@ -1208,6 +1209,14 @@ function AdminDashboardPage() {
                               <div className="text-[11px] text-neutral-400">
                                 {preOrdered.length > 0 ? `${preOrdered.length} items pre-ordered` : "No pre-order"}
                               </div>
+                              {b.items && b.items.length > 0 && b.status !== "cancelled" && (
+                                <div
+                                  className="text-[11px] text-amber-300/90 mt-0.5"
+                                  title={b.items.map((i) => `${i.qty}x ${i.name}: ${ITEM_STATUS_LABELS[i.status]}`).join("\n")}
+                                >
+                                  {formatItemProgress(b.items)}
+                                </div>
+                              )}
                             </td>
 
                             {/* Status Badge */}

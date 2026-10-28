@@ -460,7 +460,7 @@ function ReservePage() {
           prepTimeMinutes: menuItem.prepTimeMinutes,
           fulfillment: state.fulfillment,
           category: menuItem.category,
-          status: "pending" as const,
+          status: "PENDING" as const,
           isVeg: menuItem.isVeg,
           image: menuItem.image || "/uploads/menu/placeholder.webp",
         };
