@@ -38,6 +38,7 @@ import {
   Sparkles,
   Bell,
   Download,
+  Printer,
   Send,
   Phone,
   Mail,
@@ -77,7 +78,7 @@ import {
   clearAuditLogs,
   type AuditLogRecord,
 } from "@/lib/audit-logs";
-import { downloadSavedBill, getOrCreateBill, isBillable, BillNotAllowedError } from "@/lib/receipt.service";
+import { downloadSavedBill, openBillForPrint } from "@/lib/receipt.service";
 import {
   getCurrentAdmin,
   logoutAdmin,
@@ -91,6 +92,7 @@ import {
 import {
   getAllBookings,
   updateBookingStatus,
+  generateOrderBill,
   type BookingInput,
   type BookingStatus,
 } from "@/lib/bookings.functions";
@@ -274,13 +276,33 @@ function AdminDashboardPage() {
     }
   }, [activeAdminTab, auditSearch, auditDateFilter, auditCategoryFilter]);
 
-  const handleAdminDownloadReceipt = async (b: BookingInput) => {
+  /**
+   * Generate Bill (Completed → Billed): generates and saves the bill once, then opens it
+   * for printing. For a Billed order it reopens the same saved bill.
+   */
+  const handleGenerateBill = async (b: BookingInput) => {
+    if (actionLoadingCode) return;
+    // Open the print tab now, while still inside the click (popup blockers allow this)
+    const printTab = window.open("", "_blank");
+    setActionLoadingCode(b.code);
     try {
-      // Returns the saved bill (generated once on Complete); refuses non-completed orders
-      downloadSavedBill(await getOrCreateBill(b));
-      toast.success(`Downloaded bill for ${b.code}`);
-    } catch (err) {
-      toast.error(err instanceof BillNotAllowedError ? err.message : "Failed to generate PDF receipt.");
+      const res = await generateOrderBill(b.code);
+      if (!res.success) {
+        printTab?.close();
+        toast.error(res.error);
+        return;
+      }
+      openBillForPrint(res.bill, printTab);
+      setBookings((prev) => prev.map((o) => (o.code === b.code ? { ...o, status: "billed" } : o)));
+      toast.success(
+        b.status === "billed" ? `Opened bill ${res.bill.receiptNumber}` : `Bill ${res.bill.receiptNumber} generated for ${b.code}`,
+        { action: { label: "Download PDF", onClick: () => downloadSavedBill(res.bill) } }
+      );
+    } catch {
+      printTab?.close();
+      toast.error("Failed to generate the bill.");
+    } finally {
+      setActionLoadingCode(null);
     }
   };
 
@@ -478,19 +500,6 @@ function AdminDashboardPage() {
         prev.map((b) => (b.code === code ? { ...b, status: newStatus } : b))
       );
 
-      // Completing a confirmed order generates and saves its bill (once)
-      const booking = bookings.find((b) => b.code === code);
-      if (newStatus === "completed" && booking) {
-        try {
-          const bill = await getOrCreateBill({ ...booking, status: "completed" });
-          toast.success(`Bill ${bill.receiptNumber} generated for ${code}`, {
-            action: { label: "View bill", onClick: () => downloadSavedBill(bill) },
-          });
-        } catch (err) {
-          toast.error(err instanceof Error ? `Order completed, but the bill failed: ${err.message}` : "Bill generation failed.");
-        }
-      }
-
       logActivity({
         user: admin?.name || "Admin",
         action: newStatus === "cancelled" ? "RESERVATION_CANCELLED" : "RESERVATION_STATUS_UPDATED",
@@ -519,7 +528,7 @@ function AdminDashboardPage() {
     const total = bookings.length;
     const todayCount = bookings.filter((b) => b.date === todayStr).length;
     const confirmedCount = bookings.filter((b) => b.status === "confirmed").length;
-    const completedCount = bookings.filter((b) => b.status === "completed").length;
+    const completedCount = bookings.filter((b) => b.status === "completed" || b.status === "billed").length;
     const cancelledCount = bookings.filter((b) => b.status === "cancelled" || b.status === "no_show").length;
     const totalGuestsToday = bookings
       .filter((b) => b.date === todayStr && b.status !== "cancelled")
@@ -1069,6 +1078,7 @@ function AdminDashboardPage() {
                   <option value="pending">Pending</option>
                   <option value="confirmed">Confirmed</option>
                   <option value="completed">Completed</option>
+                  <option value="billed">Billed</option>
                   <option value="cancelled">Cancelled</option>
                   <option value="no_show">No-Show</option>
                 </select>
@@ -1222,7 +1232,7 @@ function AdminDashboardPage() {
                             <td className="px-5 py-4 whitespace-nowrap">
                               {(() => {
                                 const statusLabel = getOrderStatusLabel(b.orderType, b.status, b.kitchenStatus);
-                                const isCompleted = b.status === "completed" || b.kitchenStatus === "completed";
+                                const isCompleted = b.status === "completed" || b.status === "billed" || b.kitchenStatus === "completed";
                                 const isCancelled = b.status === "cancelled" || b.kitchenStatus === "cancelled";
                                 const isNoShow = b.status === "no_show";
 
@@ -1255,68 +1265,56 @@ function AdminDashboardPage() {
                             {/* Actions */}
                             <td className="px-5 py-4 whitespace-nowrap text-right">
                               <div className="flex items-center justify-end gap-1.5">
-                                {/* Flow: Pending → Confirm → Complete (no skipping) */}
-                                {b.status === "pending" && (
-                                  <Button
-                                    size="sm"
-                                    variant="ghost"
-                                    onClick={() => handleUpdateStatus(b.code, "confirmed")}
-                                    disabled={actionLoadingCode === b.code}
-                                    className="h-7 px-2 text-[11px] text-emerald-400 hover:text-emerald-300 hover:bg-emerald-950/50"
-                                    title="Mark as Confirmed"
-                                  >
-                                    Confirm
-                                  </Button>
-                                )}
-
-                                {(b.status === "pending" || b.status === "confirmed") && (
-                                  <Button
-                                    size="sm"
-                                    variant="ghost"
-                                    onClick={() => handleUpdateStatus(b.code, "completed")}
-                                    disabled={actionLoadingCode === b.code || b.status !== "confirmed"}
-                                    className="h-7 px-2 text-[11px] text-blue-400 hover:text-blue-300 hover:bg-blue-950/50 disabled:text-neutral-600 disabled:hover:bg-transparent"
-                                    title={b.status === "confirmed" ? "Mark as Completed and generate the bill" : "Confirm the order first"}
-                                  >
-                                    Complete
-                                  </Button>
-                                )}
-
-                                {b.status === "confirmed" && (
-                                  <Button
-                                    size="sm"
-                                    variant="ghost"
-                                    onClick={() => handleUpdateStatus(b.code, "no_show")}
-                                    disabled={actionLoadingCode === b.code}
-                                    className="h-7 px-2 text-[11px] text-amber-400 hover:text-amber-300 hover:bg-amber-950/50"
-                                    title="Mark as No-Show"
-                                  >
-                                    No-Show
-                                  </Button>
-                                )}
-
-                                {(b.status === "pending" || b.status === "confirmed") && (
-                                  <Button
-                                    size="sm"
-                                    variant="ghost"
-                                    onClick={() => handleUpdateStatus(b.code, "cancelled")}
-                                    disabled={actionLoadingCode === b.code}
-                                    className="h-7 px-2 text-[11px] text-red-400 hover:text-red-300 hover:bg-red-950/50"
-                                    title="Cancel Reservation"
-                                  >
-                                    Cancel
-                                  </Button>
-                                )}
+                                {/* Flow: Pending → Confirm → Complete → Generate Bill (Cancel only while Pending/Confirmed) */}
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  onClick={() => handleUpdateStatus(b.code, "confirmed")}
+                                  disabled={actionLoadingCode === b.code || b.status !== "pending"}
+                                  className="h-7 px-2 text-[11px] text-emerald-400 hover:text-emerald-300 hover:bg-emerald-950/50 disabled:text-neutral-600 disabled:hover:bg-transparent"
+                                  title={b.status === "pending" ? "Confirm this order" : "Only pending orders can be confirmed"}
+                                >
+                                  Confirm
+                                </Button>
 
                                 <Button
                                   size="sm"
                                   variant="ghost"
-                                  onClick={() => handleAdminDownloadReceipt(b)}
-                                  disabled={!isBillable(b)}
-                                  className="h-7 px-2 text-[11px] text-amber-400 hover:text-amber-300 hover:bg-amber-950/50 disabled:text-neutral-600 disabled:hover:bg-transparent"
-                                  title={isBillable(b) ? "Download bill (PDF)" : "The bill is available once the order is completed"}
+                                  onClick={() => handleUpdateStatus(b.code, "completed")}
+                                  disabled={actionLoadingCode === b.code || b.status !== "confirmed"}
+                                  className="h-7 px-2 text-[11px] text-blue-400 hover:text-blue-300 hover:bg-blue-950/50 disabled:text-neutral-600 disabled:hover:bg-transparent"
+                                  title={b.status === "confirmed" ? "Mark as Completed" : b.status === "pending" ? "Confirm the order first" : "Only confirmed orders can be completed"}
                                 >
-                                  <Download className="size-3 mr-1" /> View/Print Bill
+                                  Complete
+                                </Button>
+
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  onClick={() => handleGenerateBill(b)}
+                                  disabled={actionLoadingCode === b.code || (b.status !== "completed" && b.status !== "billed")}
+                                  className="h-7 px-2 text-[11px] text-amber-400 hover:text-amber-300 hover:bg-amber-950/50 disabled:text-neutral-600 disabled:hover:bg-transparent"
+                                  title={
+                                    b.status === "completed"
+                                      ? "Generate, save and print the bill"
+                                      : b.status === "billed"
+                                      ? "Reopen and print the saved bill"
+                                      : "Complete the order before generating the bill"
+                                  }
+                                >
+                                  <Printer className="size-3 mr-1" />
+                                  {b.status === "billed" ? "View / Print Bill" : "Generate Bill"}
+                                </Button>
+
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  onClick={() => handleUpdateStatus(b.code, "cancelled")}
+                                  disabled={actionLoadingCode === b.code || (b.status !== "pending" && b.status !== "confirmed")}
+                                  className="h-7 px-2 text-[11px] text-red-400 hover:text-red-300 hover:bg-red-950/50 disabled:text-neutral-600 disabled:hover:bg-transparent"
+                                  title={b.status === "pending" || b.status === "confirmed" ? "Cancel this order" : "Only pending or confirmed orders can be cancelled"}
+                                >
+                                  Cancel
                                 </Button>
                               </div>
                             </td>

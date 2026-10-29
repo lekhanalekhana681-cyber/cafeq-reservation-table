@@ -5,7 +5,14 @@ import { emitKitchenEvent, playNewOrderSound } from "@/lib/kitchen.sync";
 import { sendWhatsAppMessage, sendSms } from "@/lib/notifications.functions";
 import { dispatchNotification } from "@/lib/notifications";
 import { verifyRazorpayPaymentSignature } from "@/lib/razorpay.service";
-import { storeReceipt, generateReceiptNumber } from "@/lib/receipt.service";
+import {
+  storeReceipt,
+  generateReceiptNumber,
+  getOrCreateBill,
+  getSavedBill,
+  BillNotAllowedError,
+  type StoredReceipt,
+} from "@/lib/receipt.service";
 import { createAdminNotification } from "@/lib/admin-notifications";
 import { logActivity } from "@/lib/audit-logs";
 import { getCafeSettings } from "@/lib/settings.functions";
@@ -90,7 +97,7 @@ const bookingSchema = z.object({
   paymentReference: z.string().optional().nullable(),
   userId: z.string().optional().nullable(),
   // pending_payment / expired are set by the database for pre-orders awaiting online payment
-  status: z.enum(["pending", "confirmed", "cancelled", "completed", "no_show", "pending_payment", "expired"]).default("confirmed"),
+  status: z.enum(["pending", "confirmed", "cancelled", "completed", "billed", "no_show", "pending_payment", "expired"]).default("confirmed"),
   kitchenStatus: z.enum(["new", "preparing", "ready", "completed", "cancelled"]).default("new"),
   orderType: orderTypeSchema.default("DINE_IN"),
   tableNumber: z.string().max(20).optional().nullable(),
@@ -126,7 +133,7 @@ const bookingSchema = z.object({
 import { getOutOfStockItemIds } from "@/lib/stock";
 import { getStoredMenu } from "@/lib/menu";
 
-export type BookingStatus = "pending" | "confirmed" | "cancelled" | "completed" | "no_show" | "pending_payment" | "expired";
+export type BookingStatus = "pending" | "confirmed" | "cancelled" | "completed" | "billed" | "no_show" | "pending_payment" | "expired";
 
 /**
  * Admin order flow: pending → confirmed → completed, no skipping.
@@ -135,7 +142,8 @@ export type BookingStatus = "pending" | "confirmed" | "cancelled" | "completed" 
 export const ORDER_STATUS_TRANSITIONS: Record<BookingStatus, BookingStatus[]> = {
   pending: ["confirmed", "cancelled"],
   confirmed: ["completed", "cancelled", "no_show"],
-  completed: [],
+  completed: ["billed"],
+  billed: [],
   cancelled: [],
   no_show: [],
   pending_payment: ["cancelled"],
@@ -149,7 +157,63 @@ export function canTransitionOrderStatus(from: BookingStatus, to: BookingStatus)
 function statusTransitionMessage(from: string, to: string): string {
   if (from === "pending" && to === "completed") return "Confirm the order before completing it.";
   if (from === "pending" && to === "no_show") return "Confirm the order before marking a no-show.";
+  if (from === "cancelled") return "This order was cancelled — it can't be changed, completed or billed.";
+  if (from === "billed") return "This order has already been billed and can't be changed.";
+  if (to === "billed") return "Use Generate Bill to bill a completed order.";
+  if (to === "cancelled" && from === "completed") return "A completed order can no longer be cancelled.";
   return `An order can't go from "${from.replace(/_/g, " ")}" to "${to.replace(/_/g, " ")}".`;
+}
+
+/** Clear message for a bill requested out of order. */
+function billNotAllowedMessage(status: string): string {
+  if (status === "pending") return "Confirm and complete the order before generating the bill.";
+  if (status === "confirmed") return "Complete the order before generating the bill.";
+  if (status === "cancelled") return "This order was cancelled — it can't be billed.";
+  return `A bill can't be generated for an order that is "${status.replace(/_/g, " ")}".`;
+}
+
+/**
+ * The "Generate Bill" action. Allowed only for a Completed order; generates the bill once,
+ * saves it and moves the order to Billed. For an already-Billed order it returns the saved
+ * bill, so reopening shows the same bill. Every other status gets a clear error.
+ * The database enforces the same rules (20261101000000_billed_status.sql).
+ */
+export async function generateOrderBill(
+  code: string
+): Promise<{ success: true; bill: StoredReceipt; status: "billed" } | { success: false; error: string }> {
+  const supabase = getPublicClient();
+  let booking: BookingInput | null = null;
+  if (supabase) {
+    const { data } = await supabase.from("bookings").select("*").eq("code", code).maybeSingle();
+    if (data) booking = withKitchenState(mapBookingRow(data as BookingRow));
+  } else {
+    const local = safeGetBookings().find((b) => b.code === code);
+    booking = local ? withKitchenState(local) : null;
+  }
+  if (!booking) return { success: false, error: "Order not found." };
+
+  if (booking.status === "billed") {
+    const saved = await getSavedBill(code);
+    return saved
+      ? { success: true, bill: saved, status: "billed" }
+      : { success: false, error: "This order is billed but its saved bill couldn't be found." };
+  }
+  if (booking.status !== "completed") {
+    return { success: false, error: billNotAllowedMessage(booking.status) };
+  }
+
+  try {
+    const bill = await getOrCreateBill(booking);
+    if (!supabase) {
+      // Local mode: the database trigger isn't there to mark the order billed
+      safeSaveBookings(safeGetBookings().map((b) => (b.code === code ? { ...b, status: "billed" as const } : b)));
+    }
+    emitKitchenEvent("ORDER_STATUS_CHANGED", { code, bookingStatus: "billed" });
+    return { success: true, bill, status: "billed" };
+  } catch (err) {
+    if (err instanceof BillNotAllowedError) return { success: false, error: billNotAllowedMessage(booking.status) };
+    return { success: false, error: err instanceof Error ? err.message : "Could not generate the bill." };
+  }
 }
 export type BookingInput = z.infer<typeof bookingSchema>;
 
@@ -259,7 +323,7 @@ export function withKitchenState(b: BookingInput): BookingInput {
   }));
   let kitchenStatus: KitchenStatus;
   if (b.status === "cancelled") kitchenStatus = "cancelled";
-  else if (b.status === "completed") kitchenStatus = "completed";
+  else if (b.status === "completed" || b.status === "billed") kitchenStatus = "completed";
   else kitchenStatus = items.length > 0 ? deriveTicketStatus(items) : b.kitchenStatus || "new";
   return { ...b, items, kitchenStatus };
 }
@@ -816,6 +880,7 @@ function paymentGuardMessage(message: string): string {
     return statusTransitionMessage(from || "", to || "");
   }
   if (message.startsWith("ORDER_NOT_CONFIRMED")) return "Confirm the order first.";
+  if (message.startsWith("BILL_NOT_GENERATED")) return "Use Generate Bill to bill a completed order.";
   if (message.startsWith("PAYMENT_FIELDS_READ_ONLY")) return "Payment details can only be changed by the payment system.";
   return "Could not update the booking. Please try again.";
 }
@@ -989,6 +1054,10 @@ export async function updateBookingStatus({
   code: string;
   status: BookingStatus;
 }): Promise<{ success: boolean; error?: string }> {
+  // Billed is only reached through generateOrderBill (which saves the bill first)
+  if (status === "billed") {
+    return { success: false, error: statusTransitionMessage("completed", "billed") };
+  }
   const supabase = getPublicClient();
   if (supabase) {
     const { error } = await supabase.from("bookings").update({ status }).eq("code", code);

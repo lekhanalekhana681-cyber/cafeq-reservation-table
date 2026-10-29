@@ -388,7 +388,7 @@ export function PaymentsPanel({ defaultIdentifier }: { defaultIdentifier?: strin
             {data.orders.map((o) => {
               const busy = busyCode === o.code;
               const refundable = refundablePaise(o);
-              const active = !["cancelled", "no_show", "completed", "expired", "pending_payment"].includes(o.status);
+              const active = !["cancelled", "no_show", "completed", "billed", "expired", "pending_payment"].includes(o.status);
               const paidOnline = o.amount_paid_paise > 0;
               return (
                 <article key={o.code} className="rounded-xl border border-neutral-800 bg-neutral-950/60 p-3.5">

@@ -293,6 +293,10 @@ export function createPaymentService({ db, razorpay, webhookSecret, notify = asy
 
   async function cancelOrder(code, actor, reason) {
     const plan = await db.rpc("pay_cancel_plan", { _code: code, _actor: actor === "customer" ? "customer" : "cafe" });
+    // Billed is a final state; check before any refund is issued
+    if (plan.booking?.status === "billed") {
+      throw new PaymentError(409, "NOT_CANCELLABLE", "This order has already been billed and can no longer be cancelled.");
+    }
     if (plan.action === "refund") {
       const out = await refundAll(code, actor, reason);
       const res = await db.rpc("pay_set_outcome", { _code: code, _status: "cancelled", _forfeit: false, _actor: actor, _reason: reason });

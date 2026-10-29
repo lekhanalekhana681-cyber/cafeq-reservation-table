@@ -84,6 +84,7 @@ export function getOrderStatusLabel(orderType?: string | null, status?: string |
   if (bookingStatus === "cancelled" || kitchen === "cancelled") return "Cancelled";
   if (bookingStatus === "no_show") return "No-Show";
   if (bookingStatus === "pending") return "Pending";
+  if (bookingStatus === "billed") return "Billed";
 
   const steps = getOrderTypePipelineSteps(normType);
   const finalStep = steps[steps.length - 1];
