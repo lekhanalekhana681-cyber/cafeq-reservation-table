@@ -73,7 +73,7 @@ async function runTests() {
     averagePrepMinutes,
   } = await import("../src/lib/order-items");
   const { seedDefaultKitchen, loginKitchen, logoutKitchen } = await import("../src/lib/auth");
-  const { createBooking, getAllBookings, updateOrderItemStatus, setOrderItemsStatus, updateKitchenOrderStatus } =
+  const { createBooking, getAllBookings, updateOrderItemStatus, setOrderItemsStatus, updateKitchenOrderStatus, updateBookingStatus } =
     await import("../src/lib/bookings.functions");
 
   // --------------------------------------------------------------------------
@@ -168,6 +168,9 @@ async function runTests() {
   });
 
   const get = async () => (await getAllBookings()).find((b) => b.code === code)!;
+  const blocked = await updateOrderItemStatus({ code, itemId: "hot-chocolate", status: "PREPARING", expectedStatus: "PENDING" });
+  assert(!blocked.success && /confirmed/i.test(blocked.error || ""), "Kitchen cannot start items before the admin confirms the order");
+  await updateBookingStatus({ code, status: "confirmed" });
   const statusOf = async () => (await get()).items.map((i) => i.status).join(",");
 
   let t = await get();
@@ -241,6 +244,7 @@ async function runTests() {
     } as any,
   });
   const get2 = async () => (await getAllBookings()).find((b) => b.code === code2)!;
+  await updateBookingStatus({ code: code2, status: "confirmed" });
 
   await updateOrderItemStatus({ code: code2, itemId: "tiramisu", status: "CANCELLED", expectedStatus: "PENDING" });
   let t2 = await get2();
@@ -278,6 +282,7 @@ async function runTests() {
       orderType: "TAKEAWAY",
     } as any,
   });
+  await updateBookingStatus({ code: code3, status: "confirmed" });
   await updateKitchenOrderStatus({ code: code3, status: "completed" });
   const t3 = (await getAllBookings()).find((b) => b.code === code3)!;
   assert(t3.kitchenStatus === "completed" && t3.items[0].status === "SERVED", "Single-item ticket steps through every stage to COMPLETED");

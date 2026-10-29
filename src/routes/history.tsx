@@ -578,6 +578,10 @@ function HistoryPage() {
                         <Badge variant="destructive" className="text-xs">
                           Cancelled
                         </Badge>
+                      ) : b.status === "pending" ? (
+                        <Badge variant="outline" className="text-xs text-amber-600 dark:text-amber-400 border-amber-500/40 bg-amber-500/10">
+                          Awaiting confirmation
+                        </Badge>
                       ) : b.status === "pending_payment" ? (
                         <Badge variant="outline" className="text-xs text-amber-600 dark:text-amber-400 border-amber-500/40 bg-amber-500/10">
                           Payment pending

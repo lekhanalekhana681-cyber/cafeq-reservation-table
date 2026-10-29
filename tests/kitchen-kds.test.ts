@@ -77,6 +77,7 @@ async function runTests() {
   const {
     createBooking,
     updateKitchenOrderStatus,
+    updateBookingStatus,
     updateOrderItemStatus,
     getAllBookings,
   } = await import("../src/lib/bookings.functions");
@@ -214,6 +215,10 @@ async function runTests() {
   assert(created !== undefined, "Order ticket created in system");
   assert(created?.kitchenStatus === "new", "Initial kitchen status is 'new'");
 
+  // Step 2.0: Admin confirms the order (new orders start as pending)
+  assert(created?.status === "pending", "New order starts as pending (awaiting admin confirmation)");
+  await updateBookingStatus({ code: testOrderCode, status: "confirmed" });
+
   // Step 2.1: Accept and start preparing
   await updateKitchenOrderStatus({
     code: testOrderCode,
@@ -294,6 +299,7 @@ async function runTests() {
     },
   });
 
+  await updateBookingStatus({ code: rejectTestCode, status: "confirmed" });
   await updateKitchenOrderStatus({
     code: rejectTestCode,
     status: "cancelled",

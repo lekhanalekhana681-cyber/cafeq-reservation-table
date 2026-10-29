@@ -50,6 +50,7 @@ const MIGRATIONS = [
   "20261028000000_enforce_order_type_rules.sql",
   "20261029000000_per_item_kitchen_status.sql",
   "20261030000000_preorder_payments.sql",
+  "20261031000000_order_status_flow.sql",
 ];
 
 /** Fake Razorpay gateway: same shape as createRazorpayClient, real HMAC signatures. */
@@ -125,6 +126,11 @@ async function runTests() {
       deposit_amount integer DEFAULT 0, kitchen_load text DEFAULT 'normal', customer_email text,
       payment_status text DEFAULT 'pending_cash', payment_reference text, user_id uuid);
     CREATE TABLE public.cafe_settings (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), key text NOT NULL UNIQUE, value text NOT NULL);
+    CREATE TABLE public.receipts (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), booking_code text NOT NULL, receipt_number text NOT NULL UNIQUE,
+      amount numeric(10,2) NOT NULL, tax_amount numeric(10,2) NOT NULL DEFAULT 0, items jsonb DEFAULT '[]'::jsonb NOT NULL,
+      customer_name text NOT NULL, customer_phone text NOT NULL, created_at timestamptz DEFAULT now());
+    GRANT SELECT, INSERT, UPDATE ON public.receipts TO anon;
     CREATE TABLE public.menu_items (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), name varchar NOT NULL UNIQUE, category varchar NOT NULL,
       price numeric(10,2) NOT NULL, is_available boolean DEFAULT true);
@@ -218,7 +224,7 @@ async function runTests() {
 
   const walkIn = await placeOrder({ ...istSlot(-5) });
   b = await getBooking(walkIn);
-  assert(!b.payment_required && b.status === "confirmed" && b.payment_state === "UNPAID", "Dine-in at the cafe (arrival now) is not a pre-order — unchanged behaviour");
+  assert(!b.payment_required && b.status === "pending" && b.payment_state === "UNPAID", "Dine-in at the cafe (arrival now) is not a pre-order — no payment, awaits admin confirmation");
 
   const latte = await placeOrder({ items: JSON.stringify([{ id: "x", name: "Cafe Latte", qty: 1, fulfillment: "pre_ordered" }]) });
   b = await getBooking(latte);
@@ -393,7 +399,7 @@ async function runTests() {
   await service.updateSettings({ settings: { preorder_payment_mode: "NONE" }, actor: "admin:Owner" });
   const none = await placeOrder();
   b = await getBooking(none);
-  assert(!b.payment_required && b.status === "confirmed", "Mode NONE → pre-orders go straight to the kitchen");
+  assert(!b.payment_required && b.status === "pending", "Mode NONE → no online payment; order awaits admin confirmation");
   await expectError(() => service.updateSettings({ settings: { deposit_percent: 0 }, actor: "admin:Owner" }), "INVALID_SETTING", "Invalid deposit percent rejected");
   await service.updateSettings({ settings: { preorder_payment_mode: "DEPOSIT" }, actor: "admin:Owner" });
 
@@ -441,6 +447,47 @@ async function runTests() {
     () => asAnon("UPDATE public.bookings SET status = 'cancelled' WHERE code = $1", [code2]),
     "PAID_ORDER_USE_PAYMENTS",
     "Paid pre-order can't be cancelled directly (must go through refund/forfeit)"
+  );
+
+  // --------------------------------------------------------------------------
+  // SUITE 7b: Admin order flow & bills, enforced by the database (anon key)
+  // --------------------------------------------------------------------------
+  console.log("\nSuite 7b: Pending → Confirmed → Completed & One Bill per Order");
+
+  const flow = await placeOrder({ ...istSlot(-5) }); // at the cafe: no payment needed
+  b = await getBooking(flow);
+  assert(b.status === "pending", "New order is stored as pending");
+  await expectError(
+    () => asAnon("UPDATE public.bookings SET status = 'completed' WHERE code = $1", [flow]),
+    "INVALID_STATUS_TRANSITION:pending -> completed",
+    "Skipping Pending → Completed is blocked"
+  );
+  await expectError(
+    () => asAnon("SELECT public.kds_set_item_status($1, ARRAY['cafe-latte'], 'PREPARING')", [flow]),
+    "ORDER_NOT_CONFIRMED",
+    "Kitchen cannot start a pending order"
+  );
+  const insertBill = (code: string, number: string) =>
+    asAnon(
+      "INSERT INTO public.receipts (booking_code, receipt_number, amount, tax_amount, customer_name, customer_phone) VALUES ($1, $2, 504, 24, 'Neha', '1')",
+      [code, number]
+    );
+  await expectError(() => insertBill(flow, `CQ-BILL-${flow}-A`), "BILL_NOT_ALLOWED", "Bill for a pending order is refused");
+  await asAnon("UPDATE public.bookings SET status = 'confirmed' WHERE code = $1", [flow]);
+  await expectError(() => insertBill(flow, `CQ-BILL-${flow}-A`), "BILL_NOT_ALLOWED", "Bill for a confirmed (not completed) order is refused");
+  await asAnon("UPDATE public.bookings SET status = 'completed' WHERE code = $1", [flow]);
+  await insertBill(flow, `CQ-BILL-${flow}-A`);
+  assert(true, "Confirmed → Completed, then the bill is saved");
+  await expectError(() => insertBill(flow, `CQ-BILL-${flow}-B`), "uniq_receipts_one_bill_per_order", "A second bill for the same order is refused");
+  await expectError(
+    () => asAnon("UPDATE public.receipts SET amount = 1 WHERE booking_code = $1", [flow]),
+    "BILL_IS_FINAL",
+    "A saved bill can't be edited"
+  );
+  await expectError(
+    () => asAnon("UPDATE public.bookings SET status = 'cancelled' WHERE code = $1", [flow]),
+    "INVALID_STATUS_TRANSITION:completed -> cancelled",
+    "A completed order can't be cancelled afterwards"
   );
 
   // --------------------------------------------------------------------------

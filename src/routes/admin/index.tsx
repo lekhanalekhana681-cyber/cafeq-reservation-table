@@ -77,7 +77,7 @@ import {
   clearAuditLogs,
   type AuditLogRecord,
 } from "@/lib/audit-logs";
-import { downloadReceiptPdf, generateBill, isBillable, BillNotAllowedError } from "@/lib/receipt.service";
+import { downloadSavedBill, getOrCreateBill, isBillable, BillNotAllowedError } from "@/lib/receipt.service";
 import {
   getCurrentAdmin,
   logoutAdmin,
@@ -276,8 +276,8 @@ function AdminDashboardPage() {
 
   const handleAdminDownloadReceipt = async (b: BookingInput) => {
     try {
-      // generateBill refuses non-completed orders and computes Subtotal + CGST + SGST from the items
-      downloadReceiptPdf(generateBill(b));
+      // Returns the saved bill (generated once on Complete); refuses non-completed orders
+      downloadSavedBill(await getOrCreateBill(b));
       toast.success(`Downloaded bill for ${b.code}`);
     } catch (err) {
       toast.error(err instanceof BillNotAllowedError ? err.message : "Failed to generate PDF receipt.");
@@ -477,6 +477,19 @@ function AdminDashboardPage() {
       setBookings((prev) =>
         prev.map((b) => (b.code === code ? { ...b, status: newStatus } : b))
       );
+
+      // Completing a confirmed order generates and saves its bill (once)
+      const booking = bookings.find((b) => b.code === code);
+      if (newStatus === "completed" && booking) {
+        try {
+          const bill = await getOrCreateBill({ ...booking, status: "completed" });
+          toast.success(`Bill ${bill.receiptNumber} generated for ${code}`, {
+            action: { label: "View bill", onClick: () => downloadSavedBill(bill) },
+          });
+        } catch (err) {
+          toast.error(err instanceof Error ? `Order completed, but the bill failed: ${err.message}` : "Bill generation failed.");
+        }
+      }
 
       logActivity({
         user: admin?.name || "Admin",
@@ -1053,6 +1066,7 @@ function AdminDashboardPage() {
                   className="rounded-xl bg-neutral-950 border border-neutral-800 text-neutral-300 text-xs px-3 py-2 focus:outline-none focus:border-amber-500"
                 >
                   <option value="all">All Statuses</option>
+                  <option value="pending">Pending</option>
                   <option value="confirmed">Confirmed</option>
                   <option value="completed">Completed</option>
                   <option value="cancelled">Cancelled</option>
@@ -1241,7 +1255,8 @@ function AdminDashboardPage() {
                             {/* Actions */}
                             <td className="px-5 py-4 whitespace-nowrap text-right">
                               <div className="flex items-center justify-end gap-1.5">
-                                {b.status !== "confirmed" && (
+                                {/* Flow: Pending → Confirm → Complete (no skipping) */}
+                                {b.status === "pending" && (
                                   <Button
                                     size="sm"
                                     variant="ghost"
@@ -1254,20 +1269,20 @@ function AdminDashboardPage() {
                                   </Button>
                                 )}
 
-                                {b.status !== "completed" && (
+                                {(b.status === "pending" || b.status === "confirmed") && (
                                   <Button
                                     size="sm"
                                     variant="ghost"
                                     onClick={() => handleUpdateStatus(b.code, "completed")}
-                                    disabled={actionLoadingCode === b.code}
-                                    className="h-7 px-2 text-[11px] text-blue-400 hover:text-blue-300 hover:bg-blue-950/50"
-                                    title="Mark as Completed / Dined"
+                                    disabled={actionLoadingCode === b.code || b.status !== "confirmed"}
+                                    className="h-7 px-2 text-[11px] text-blue-400 hover:text-blue-300 hover:bg-blue-950/50 disabled:text-neutral-600 disabled:hover:bg-transparent"
+                                    title={b.status === "confirmed" ? "Mark as Completed and generate the bill" : "Confirm the order first"}
                                   >
                                     Complete
                                   </Button>
                                 )}
 
-                                {b.status !== "no_show" && b.status !== "completed" && (
+                                {b.status === "confirmed" && (
                                   <Button
                                     size="sm"
                                     variant="ghost"
@@ -1280,7 +1295,7 @@ function AdminDashboardPage() {
                                   </Button>
                                 )}
 
-                                {b.status !== "cancelled" && (
+                                {(b.status === "pending" || b.status === "confirmed") && (
                                   <Button
                                     size="sm"
                                     variant="ghost"
@@ -1301,7 +1316,7 @@ function AdminDashboardPage() {
                                   className="h-7 px-2 text-[11px] text-amber-400 hover:text-amber-300 hover:bg-amber-950/50 disabled:text-neutral-600 disabled:hover:bg-transparent"
                                   title={isBillable(b) ? "Download bill (PDF)" : "The bill is available once the order is completed"}
                                 >
-                                  <Download className="size-3 mr-1" /> Receipt
+                                  <Download className="size-3 mr-1" /> View/Print Bill
                                 </Button>
                               </div>
                             </td>
