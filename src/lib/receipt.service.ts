@@ -6,7 +6,86 @@
 import { jsPDF } from "jspdf";
 import { createClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
-import type { OrderItem } from "@/lib/bookings.functions";
+import type { BookingInput, OrderItem } from "@/lib/bookings.functions";
+import { getOrderTypeDetails } from "@/lib/order-types";
+
+// ─── Bill Tax Configuration ───────────────────────────────────────────────────
+
+/** GST on restaurant bills. Change rates here; the bill and its labels follow. */
+export const BILL_TAX_RATES = {
+  cgst: 0.025,
+  sgst: 0.025,
+} as const;
+
+const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
+const pct = (rate: number) => `${round2(rate * 100)}%`;
+
+export type BillTotals = { subtotal: number; cgst: number; sgst: number; taxAmount: number; grandTotal: number };
+
+/** Subtotal = Σ price × qty; CGST/SGST on the subtotal; Grand Total = Subtotal + CGST + SGST (2 decimals). */
+export function computeBillTotals(items: Array<Pick<OrderItem, "price" | "qty">>): BillTotals {
+  const subtotal = round2(items.reduce((sum, i) => sum + i.price * i.qty, 0));
+  const cgst = round2(subtotal * BILL_TAX_RATES.cgst);
+  const sgst = round2(subtotal * BILL_TAX_RATES.sgst);
+  return { subtotal, cgst, sgst, taxAmount: round2(cgst + sgst), grandTotal: round2(subtotal + cgst + sgst) };
+}
+
+/** A bill can only be produced for an order that was confirmed and has been completed. */
+export function isBillable(b: Pick<BookingInput, "status">): boolean {
+  return b.status === "completed";
+}
+
+export class BillNotAllowedError extends Error {
+  constructor(code: string, status: string) {
+    super(`A bill can only be generated for a completed order. Order ${code} is "${status.replace(/_/g, " ")}".`);
+    this.name = "BillNotAllowedError";
+  }
+}
+
+/**
+ * Builds the bill for a completed order. Every admin bill goes through here,
+ * so non-completed orders are rejected even if the button is bypassed.
+ */
+export function generateBill(b: BookingInput): ReceiptData {
+  if (!isBillable(b)) throw new BillNotAllowedError(b.code, b.status);
+
+  // Cancelled items are not billed
+  const items = (b.items || []).filter((i) => i.status !== "CANCELLED");
+  const totals = computeBillTotals(items);
+  const type = getOrderTypeDetails(b.orderType);
+  const where =
+    type.type === "DINE_IN"
+      ? `Dine-in · Table ${b.tableNumber || b.seating || "-"}`
+      : type.type === "TAKEAWAY"
+      ? `Takeaway${b.pickupTime ? ` · ${b.pickupTime}` : ""}`
+      : "Delivery";
+
+  return {
+    receiptNumber: generateReceiptNumber(b.code),
+    bookingCode: b.code,
+    orderId: b.code,
+    paymentId: b.paymentReference || undefined,
+    paymentMethod:
+      b.paymentMethod === "online_razorpay" ? "Razorpay Online" : b.paymentMethod === "upi_prepay" ? "UPI QR Code" : "Cash at Counter",
+    paymentStatus: b.paymentStatus === "paid" ? "paid" : "pending",
+    date: b.date,
+    time: b.time,
+    customerName: b.customerName || b.name,
+    customerPhone: b.customerPhone || b.phone,
+    customerEmail: b.customerEmail || undefined,
+    tableType: where,
+    partySize: b.party,
+    items,
+    subtotal: totals.subtotal,
+    cgst: totals.cgst,
+    sgst: totals.sgst,
+    taxAmount: totals.taxAmount,
+    depositAmount: 0,
+    total: totals.grandTotal,
+    totalLabel: "GRAND TOTAL",
+    createdAt: new Date().toISOString(),
+  };
+}
 
 export interface ReceiptData {
   receiptNumber: string;
@@ -29,6 +108,8 @@ export interface ReceiptData {
   taxAmount: number;
   depositAmount: number;
   total: number;
+  /** Label for the final line; defaults to "TOTAL PAID" (payment receipts). */
+  totalLabel?: string;
   createdAt: string;
 }
 
@@ -195,11 +276,11 @@ export function generateReceiptPdf(data: ReceiptData): jsPDF {
   doc.text(`INR ${data.subtotal.toFixed(2)}`, colVal, y, { align: "right" });
 
   y += 5;
-  doc.text("CGST (2.5%):", colLabel, y);
+  doc.text(`CGST (${pct(BILL_TAX_RATES.cgst)}):`, colLabel, y);
   doc.text(`INR ${data.cgst.toFixed(2)}`, colVal, y, { align: "right" });
 
   y += 5;
-  doc.text("SGST (2.5%):", colLabel, y);
+  doc.text(`SGST (${pct(BILL_TAX_RATES.sgst)}):`, colLabel, y);
   doc.text(`INR ${data.sgst.toFixed(2)}`, colVal, y, { align: "right" });
 
   if (data.depositAmount > 0) {
@@ -214,7 +295,7 @@ export function generateReceiptPdf(data: ReceiptData): jsPDF {
   doc.setFont("helvetica", "bold");
   doc.setFontSize(10);
   doc.setTextColor(24, 24, 27);
-  doc.text("TOTAL PAID:", colLabel, y + 1);
+  doc.text(`${data.totalLabel || "TOTAL PAID"}:`, colLabel, y + 1);
   doc.text(`INR ${data.total.toFixed(2)}`, colVal, y + 1, { align: "right" });
 
   // Payment Breakdown Box

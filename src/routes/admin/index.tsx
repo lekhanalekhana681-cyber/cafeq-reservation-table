@@ -77,7 +77,7 @@ import {
   clearAuditLogs,
   type AuditLogRecord,
 } from "@/lib/audit-logs";
-import { getReceiptByBookingCode, downloadReceiptPdf, generateReceiptNumber } from "@/lib/receipt.service";
+import { downloadReceiptPdf, generateBill, isBillable, BillNotAllowedError } from "@/lib/receipt.service";
 import {
   getCurrentAdmin,
   logoutAdmin,
@@ -276,45 +276,11 @@ function AdminDashboardPage() {
 
   const handleAdminDownloadReceipt = async (b: BookingInput) => {
     try {
-      let receipt = await getReceiptByBookingCode(b.code);
-      if (!receipt) {
-        const total = b.total || 0;
-        const deposit = b.depositAmount || 0;
-        const itemsTotal = Math.max(0, total - deposit);
-        const taxAmount = Math.round(itemsTotal * 0.05 * 100) / 100;
-        const subtotal = Math.max(0, itemsTotal - taxAmount);
-        const cgst = Math.round((taxAmount / 2) * 100) / 100;
-        const sgst = Math.round((taxAmount / 2) * 100) / 100;
-
-        receipt = {
-          id: `rcpt_${b.code}`,
-          receiptNumber: generateReceiptNumber(b.code),
-          bookingCode: b.code,
-          orderId: `order_${b.code}`,
-          paymentId: b.paymentReference || "Prepaid",
-          paymentMethod: b.paymentMethod === "online_razorpay" ? "Razorpay Online" : b.paymentMethod === "upi_prepay" ? "UPI QR Code" : "Cash on Arrival",
-          paymentStatus: (b.paymentStatus as any) === "paid" ? "paid" : "pending",
-          date: b.date,
-          time: b.time,
-          customerName: b.name,
-          customerPhone: b.phone,
-          customerEmail: b.customerEmail,
-          tableType: b.tableType || "Reserved Table",
-          partySize: b.party,
-          items: b.items || [],
-          subtotal,
-          cgst,
-          sgst,
-          taxAmount,
-          depositAmount: deposit,
-          total,
-          createdAt: new Date().toISOString(),
-        };
-      }
-      downloadReceiptPdf(receipt);
-      toast.success(`Downloaded receipt for ${b.code}`);
-    } catch {
-      toast.error("Failed to generate PDF receipt.");
+      // generateBill refuses non-completed orders and computes Subtotal + CGST + SGST from the items
+      downloadReceiptPdf(generateBill(b));
+      toast.success(`Downloaded bill for ${b.code}`);
+    } catch (err) {
+      toast.error(err instanceof BillNotAllowedError ? err.message : "Failed to generate PDF receipt.");
     }
   };
 
@@ -1331,8 +1297,9 @@ function AdminDashboardPage() {
                                   size="sm"
                                   variant="ghost"
                                   onClick={() => handleAdminDownloadReceipt(b)}
-                                  className="h-7 px-2 text-[11px] text-amber-400 hover:text-amber-300 hover:bg-amber-950/50"
-                                  title="Download Digital PDF Receipt"
+                                  disabled={!isBillable(b)}
+                                  className="h-7 px-2 text-[11px] text-amber-400 hover:text-amber-300 hover:bg-amber-950/50 disabled:text-neutral-600 disabled:hover:bg-transparent"
+                                  title={isBillable(b) ? "Download bill (PDF)" : "The bill is available once the order is completed"}
                                 >
                                   <Download className="size-3 mr-1" /> Receipt
                                 </Button>
