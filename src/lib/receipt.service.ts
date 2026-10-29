@@ -501,6 +501,30 @@ export async function getOrCreateBill(b: BookingInput): Promise<StoredReceipt> {
   return record;
 }
 
+/**
+ * Opens the saved bill PDF for viewing/printing in a tab that was opened synchronously
+ * in the click handler (so popup blockers allow it), then starts the print dialog.
+ */
+export function openBillForPrint(bill: StoredReceipt, target: Window | null): void {
+  const dataUri = bill.pdfDataUri || getReceiptPdfDataUri(bill);
+  const [meta, base64] = dataUri.split(",");
+  const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+  const url = URL.createObjectURL(new Blob([bytes], { type: meta.match(/data:([^;]+)/)?.[1] || "application/pdf" }));
+  if (!target) {
+    // Popup blocked: fall back to downloading the same saved file
+    downloadSavedBill(bill);
+    return;
+  }
+  target.location.href = url;
+  target.addEventListener?.("load", () => {
+    try {
+      target.print();
+    } catch {
+      // The PDF viewer's own Print button is still available
+    }
+  });
+}
+
 /** Downloads a saved bill exactly as it was generated. */
 export function downloadSavedBill(bill: StoredReceipt): void {
   if (bill.pdfDataUri && typeof document !== "undefined") {

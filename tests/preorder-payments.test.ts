@@ -51,6 +51,7 @@ const MIGRATIONS = [
   "20261029000000_per_item_kitchen_status.sql",
   "20261030000000_preorder_payments.sql",
   "20261031000000_order_status_flow.sql",
+  "20261101000000_billed_status.sql",
 ];
 
 /** Fake Razorpay gateway: same shape as createRazorpayClient, real HMAC signatures. */
@@ -476,9 +477,20 @@ async function runTests() {
   await asAnon("UPDATE public.bookings SET status = 'confirmed' WHERE code = $1", [flow]);
   await expectError(() => insertBill(flow, `CQ-BILL-${flow}-A`), "BILL_NOT_ALLOWED", "Bill for a confirmed (not completed) order is refused");
   await asAnon("UPDATE public.bookings SET status = 'completed' WHERE code = $1", [flow]);
+  await expectError(
+    () => asAnon("UPDATE public.bookings SET status = 'cancelled' WHERE code = $1", [flow]),
+    "INVALID_STATUS_TRANSITION:completed -> cancelled",
+    "A completed order can't be cancelled"
+  );
+  await expectError(
+    () => asAnon("UPDATE public.bookings SET status = 'billed' WHERE code = $1", [flow]),
+    "BILL_NOT_GENERATED",
+    "Completed → Billed without generating the bill is refused"
+  );
   await insertBill(flow, `CQ-BILL-${flow}-A`);
-  assert(true, "Confirmed → Completed, then the bill is saved");
-  await expectError(() => insertBill(flow, `CQ-BILL-${flow}-B`), "uniq_receipts_one_bill_per_order", "A second bill for the same order is refused");
+  b = await getBooking(flow);
+  assert(b.status === "billed", "Generating (saving) the bill moves the order to Billed in the same transaction");
+  await expectError(() => insertBill(flow, `CQ-BILL-${flow}-B`), "BILL_NOT_ALLOWED:billed", "A second bill for the same order is refused");
   await expectError(
     () => asAnon("UPDATE public.receipts SET amount = 1 WHERE booking_code = $1", [flow]),
     "BILL_IS_FINAL",
@@ -486,9 +498,18 @@ async function runTests() {
   );
   await expectError(
     () => asAnon("UPDATE public.bookings SET status = 'cancelled' WHERE code = $1", [flow]),
-    "INVALID_STATUS_TRANSITION:completed -> cancelled",
-    "A completed order can't be cancelled afterwards"
+    "INVALID_STATUS_TRANSITION:billed -> cancelled",
+    "A billed order can't be cancelled"
   );
+
+  const cx = await placeOrder({ ...istSlot(-5) });
+  await asAnon("UPDATE public.bookings SET status = 'cancelled' WHERE code = $1", [cx]);
+  await expectError(
+    () => pg.query("UPDATE public.bookings SET status = 'completed' WHERE code = $1", [cx]),
+    "INVALID_STATUS_TRANSITION:cancelled -> completed",
+    "A cancelled order can never be completed — not even by the server role"
+  );
+  await expectError(() => insertBill(cx, `CQ-BILL-${cx}-A`), "BILL_NOT_ALLOWED:cancelled", "A cancelled order can never be billed");
 
   // --------------------------------------------------------------------------
   // SUITE 8: HTTP adapters (PostgREST RPC + Razorpay REST) with a mocked fetch

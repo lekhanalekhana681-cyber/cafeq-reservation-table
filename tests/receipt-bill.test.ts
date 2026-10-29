@@ -137,12 +137,12 @@ async function runTests() {
   }
 
   // --------------------------------------------------------------------------
-  // SUITE 4: Full admin flow  Pending → Confirm → Complete → bill (saved once)
+  // SUITE 4: Admin flow  Pending → Confirm → Complete → Generate Bill (→ Billed)
   // --------------------------------------------------------------------------
-  console.log("\nSuite 4: Pending → Confirm → Complete → Bill");
+  console.log("\nSuite 4: (a) Pending → Confirm → Complete → Generate Bill");
 
-  const { getOrCreateBill, getSavedBill } = await import("../src/lib/receipt.service");
-  const { createBooking, getAllBookings, updateBookingStatus } = await import("../src/lib/bookings.functions");
+  const { getSavedBill } = await import("../src/lib/receipt.service");
+  const { createBooking, getAllBookings, updateBookingStatus, generateOrderBill } = await import("../src/lib/bookings.functions");
 
   const place = async (code: string) => {
     await createBooking({
@@ -165,49 +165,66 @@ async function runTests() {
 
   let res = await updateBookingStatus({ code: "CQ-FLOW1", status: "completed" });
   assert(!res.success && /confirm the order before completing/i.test(res.error || ""), `Pending → Completed is blocked: "${res.error}"`);
-  let billRefused = false;
-  try {
-    await getOrCreateBill(order);
-  } catch (err) {
-    billRefused = err instanceof BillNotAllowedError;
-  }
-  assert(billRefused && (await getSavedBill("CQ-FLOW1")) === null, "Pending order: no bill");
 
   res = await updateBookingStatus({ code: "CQ-FLOW1", status: "confirmed" });
   order = await getFlow();
-  assert(res.success && order.status === "confirmed", "Admin clicks Confirm → Confirmed");
-  billRefused = false;
-  try {
-    await getOrCreateBill(order);
-  } catch (err) {
-    billRefused = err instanceof BillNotAllowedError;
-  }
-  assert(billRefused, "Confirmed (not yet completed) order: no bill");
+  assert(res.success && order.status === "confirmed", "Confirm → Confirmed");
 
   res = await updateBookingStatus({ code: "CQ-FLOW1", status: "completed" });
   order = await getFlow();
-  assert(res.success && order.status === "completed", "Admin clicks Complete → Completed");
-  const first = await getOrCreateBill(order);
+  assert(res.success && order.status === "completed", "Complete → Completed");
+  assert((await getSavedBill("CQ-FLOW1")) === null, "Completing does not generate the bill by itself");
+
+  res = await updateBookingStatus({ code: "CQ-FLOW1", status: "billed" });
+  assert(!res.success && /generate bill/i.test(res.error || ""), `Setting Billed without generating a bill is blocked: "${res.error}"`);
+
+  const gen = await generateOrderBill("CQ-FLOW1");
+  order = await getFlow();
+  assert(gen.success && order.status === "billed", "Generate Bill → Billed");
+  const first = gen.success ? gen.bill : (null as any);
   assert(
     first.receiptNumber.startsWith("CQ-BILL-") && first.subtotal === 480 && first.cgst === 12 && first.sgst === 12 && first.total === 504,
-    `Bill generated on Complete: ${first.receiptNumber} — ₹480 + ₹12 + ₹12 = ₹${first.total}`
+    `Bill ${first.receiptNumber}: Subtotal ₹480 + CGST ₹12 + SGST ₹12 = Grand Total ₹${first.total}`
   );
-  const reopened = await getOrCreateBill(order);
-  assert(reopened.receiptNumber === first.receiptNumber && reopened.pdfDataUri === first.pdfDataUri, "Reopening returns the same saved bill (generated once)");
-
+  const again = await generateOrderBill("CQ-FLOW1");
+  assert(
+    again.success && again.bill.receiptNumber === first.receiptNumber && again.bill.pdfDataUri === first.pdfDataUri,
+    "Reopening a billed order returns the same saved bill (generated once)"
+  );
   res = await updateBookingStatus({ code: "CQ-FLOW1", status: "cancelled" });
-  assert(!res.success, "A completed order can't be changed afterwards");
+  assert(!res.success && /already been billed/i.test(res.error || ""), `Billed order can't be cancelled: "${res.error}"`);
 
-  const getOther = await place("CQ-FLOW2");
-  await updateBookingStatus({ code: "CQ-FLOW2", status: "cancelled" });
-  const other = await getOther();
-  billRefused = false;
-  try {
-    await getOrCreateBill(other);
-  } catch (err) {
-    billRefused = err instanceof BillNotAllowedError;
-  }
-  assert(other.status === "cancelled" && billRefused && (await getSavedBill("CQ-FLOW2")) === null, "Cancelled order: no bill");
+  console.log("\nSuite 5: (b) Cancel from Pending / Confirmed");
+
+  const getP = await place("CQ-CANCEL-P");
+  res = await updateBookingStatus({ code: "CQ-CANCEL-P", status: "cancelled" });
+  assert(res.success && (await getP()).status === "cancelled", "Cancel from Pending → Cancelled");
+
+  const getC = await place("CQ-CANCEL-C");
+  await updateBookingStatus({ code: "CQ-CANCEL-C", status: "confirmed" });
+  res = await updateBookingStatus({ code: "CQ-CANCEL-C", status: "cancelled" });
+  assert(res.success && (await getC()).status === "cancelled", "Cancel from Confirmed → Cancelled");
+
+  res = await updateBookingStatus({ code: "CQ-CANCEL-C", status: "completed" });
+  assert(!res.success && /cancelled/i.test(res.error || ""), `Cancelled order can never be completed: "${res.error}"`);
+  let billRes = await generateOrderBill("CQ-CANCEL-C");
+  assert(!billRes.success && /cancelled/i.test(billRes.error) && (await getSavedBill("CQ-CANCEL-C")) === null, `Cancelled order can never be billed: "${!billRes.success ? billRes.error : ""}"`);
+
+  const getDone = await place("CQ-CANCEL-DONE");
+  await updateBookingStatus({ code: "CQ-CANCEL-DONE", status: "confirmed" });
+  await updateBookingStatus({ code: "CQ-CANCEL-DONE", status: "completed" });
+  res = await updateBookingStatus({ code: "CQ-CANCEL-DONE", status: "cancelled" });
+  assert(!res.success && (await getDone()).status === "completed", `Cancel is refused once Completed: "${res.error}"`);
+
+  console.log("\nSuite 6: (c) Generate Bill before completion is blocked");
+
+  await place("CQ-EARLY");
+  billRes = await generateOrderBill("CQ-EARLY");
+  assert(!billRes.success && /confirm and complete the order/i.test(billRes.error), `Pending: "${!billRes.success ? billRes.error : ""}"`);
+  await updateBookingStatus({ code: "CQ-EARLY", status: "confirmed" });
+  billRes = await generateOrderBill("CQ-EARLY");
+  assert(!billRes.success && /complete the order before generating/i.test(billRes.error), `Confirmed: "${!billRes.success ? billRes.error : ""}"`);
+  assert((await getSavedBill("CQ-EARLY")) === null, "No bill was saved for the non-completed order");
 
   console.log("\n==================================================");
   console.log(`  Tests Completed: ${testsPassed + testsFailed}`);
