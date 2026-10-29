@@ -219,10 +219,15 @@ function KitchenDashboardPage() {
     if (showLoadingSpinner) setLoading(true);
     try {
       const data = await getAllBookings();
-      // Kitchen-relevant tickets: orders with food/drink items. Pre-orders awaiting online
-      // payment (or expired unpaid) never reach the kitchen.
+      // Kitchen-relevant tickets: orders with food/drink items. Orders not yet confirmed by an
+      // admin, pre-orders awaiting online payment and expired unpaid ones never reach the kitchen.
       const kitchenTickets = data.filter(
-        (b) => b.items && b.items.length > 0 && b.status !== "pending_payment" && b.status !== "expired"
+        (b) =>
+          b.items &&
+          b.items.length > 0 &&
+          b.status !== "pending" &&
+          b.status !== "pending_payment" &&
+          b.status !== "expired"
       );
 
       // Chime for tickets that just appeared — new orders, and pre-orders whose payment

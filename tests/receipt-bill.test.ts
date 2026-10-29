@@ -6,10 +6,41 @@
  * 3. A non-completed order is refused.
  */
 
-// Mock window (jsPDF needs atob/btoa at import time)
+// Mock localStorage for node environment
+const mockStorage: Record<string, string> = {};
+global.localStorage = {
+  getItem: (key: string) => mockStorage[key] || null,
+  setItem: (key: string, val: string) => {
+    mockStorage[key] = String(val);
+  },
+  removeItem: (key: string) => {
+    delete mockStorage[key];
+  },
+  clear: () => {
+    for (const k in mockStorage) delete mockStorage[k];
+  },
+  key: (i: number) => Object.keys(mockStorage)[i] || null,
+  length: Object.keys(mockStorage).length,
+};
+
+// Mock window and CustomEvent (jsPDF needs atob/btoa at import time)
 (global as any).btoa = (str: string) => Buffer.from(str, "binary").toString("base64");
 (global as any).atob = (b64: string) => Buffer.from(b64, "base64").toString("binary");
-(global as any).window = { btoa: (global as any).btoa, atob: (global as any).atob };
+(global as any).window = {
+  btoa: (global as any).btoa,
+  atob: (global as any).atob,
+  dispatchEvent: () => true,
+  addEventListener: () => {},
+  removeEventListener: () => {},
+};
+(global as any).CustomEvent = class CustomEvent {
+  type: string;
+  detail: any;
+  constructor(type: string, params: any = {}) {
+    this.type = type;
+    this.detail = params.detail;
+  }
+};
 
 let testsPassed = 0;
 let testsFailed = 0;
@@ -104,6 +135,79 @@ async function runTests() {
     }
     assert(!isBillable(order) && refused, `Order with status "${status}" → bill refused`);
   }
+
+  // --------------------------------------------------------------------------
+  // SUITE 4: Full admin flow  Pending → Confirm → Complete → bill (saved once)
+  // --------------------------------------------------------------------------
+  console.log("\nSuite 4: Pending → Confirm → Complete → Bill");
+
+  const { getOrCreateBill, getSavedBill } = await import("../src/lib/receipt.service");
+  const { createBooking, getAllBookings, updateBookingStatus } = await import("../src/lib/bookings.functions");
+
+  const place = async (code: string) => {
+    await createBooking({
+      data: {
+        ...base,
+        code,
+        status: "confirmed", // a client trying to skip the Pending step
+        items: [
+          { id: "cafe-latte", name: "Cafe Latte", qty: 2, price: 180, prepTimeMinutes: 4, fulfillment: "pre_ordered" },
+          { id: "fries", name: "French Fries", qty: 1, price: 120, prepTimeMinutes: 6, fulfillment: "pre_ordered" },
+        ],
+      } as any,
+    });
+    return async () => (await getAllBookings()).find((b) => b.code === code)!;
+  };
+
+  const getFlow = await place("CQ-FLOW1");
+  let order = await getFlow();
+  assert(order.status === "pending", "New order starts as Pending (client-sent status ignored)");
+
+  let res = await updateBookingStatus({ code: "CQ-FLOW1", status: "completed" });
+  assert(!res.success && /confirm the order before completing/i.test(res.error || ""), `Pending → Completed is blocked: "${res.error}"`);
+  let billRefused = false;
+  try {
+    await getOrCreateBill(order);
+  } catch (err) {
+    billRefused = err instanceof BillNotAllowedError;
+  }
+  assert(billRefused && (await getSavedBill("CQ-FLOW1")) === null, "Pending order: no bill");
+
+  res = await updateBookingStatus({ code: "CQ-FLOW1", status: "confirmed" });
+  order = await getFlow();
+  assert(res.success && order.status === "confirmed", "Admin clicks Confirm → Confirmed");
+  billRefused = false;
+  try {
+    await getOrCreateBill(order);
+  } catch (err) {
+    billRefused = err instanceof BillNotAllowedError;
+  }
+  assert(billRefused, "Confirmed (not yet completed) order: no bill");
+
+  res = await updateBookingStatus({ code: "CQ-FLOW1", status: "completed" });
+  order = await getFlow();
+  assert(res.success && order.status === "completed", "Admin clicks Complete → Completed");
+  const first = await getOrCreateBill(order);
+  assert(
+    first.receiptNumber.startsWith("CQ-BILL-") && first.subtotal === 480 && first.cgst === 12 && first.sgst === 12 && first.total === 504,
+    `Bill generated on Complete: ${first.receiptNumber} — ₹480 + ₹12 + ₹12 = ₹${first.total}`
+  );
+  const reopened = await getOrCreateBill(order);
+  assert(reopened.receiptNumber === first.receiptNumber && reopened.pdfDataUri === first.pdfDataUri, "Reopening returns the same saved bill (generated once)");
+
+  res = await updateBookingStatus({ code: "CQ-FLOW1", status: "cancelled" });
+  assert(!res.success, "A completed order can't be changed afterwards");
+
+  const getOther = await place("CQ-FLOW2");
+  await updateBookingStatus({ code: "CQ-FLOW2", status: "cancelled" });
+  const other = await getOther();
+  billRefused = false;
+  try {
+    await getOrCreateBill(other);
+  } catch (err) {
+    billRefused = err instanceof BillNotAllowedError;
+  }
+  assert(other.status === "cancelled" && billRefused && (await getSavedBill("CQ-FLOW2")) === null, "Cancelled order: no bill");
 
   console.log("\n==================================================");
   console.log(`  Tests Completed: ${testsPassed + testsFailed}`);

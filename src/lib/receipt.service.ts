@@ -30,6 +30,9 @@ export function computeBillTotals(items: Array<Pick<OrderItem, "price" | "qty">>
   return { subtotal, cgst, sgst, taxAmount: round2(cgst + sgst), grandTotal: round2(subtotal + cgst + sgst) };
 }
 
+/** Bills are stored as receipts with this number prefix (payment receipts use CQ-RCP-). */
+export const BILL_NUMBER_PREFIX = "CQ-BILL-";
+
 /** A bill can only be produced for an order that was confirmed and has been completed. */
 export function isBillable(b: Pick<BookingInput, "status">): boolean {
   return b.status === "completed";
@@ -61,7 +64,7 @@ export function generateBill(b: BookingInput): ReceiptData {
       : "Delivery";
 
   return {
-    receiptNumber: generateReceiptNumber(b.code),
+    receiptNumber: `${BILL_NUMBER_PREFIX}${generateReceiptNumber(b.code).slice("CQ-RCP-".length)}`,
     bookingCode: b.code,
     orderId: b.code,
     paymentId: b.paymentReference || undefined,
@@ -387,6 +390,127 @@ export async function storeReceipt(data: ReceiptData): Promise<StoredReceipt> {
   }
 
   return receiptRecord;
+}
+
+// ─── Saved Bills (one per completed order) ───────────────────────────────────
+
+const LOCAL_BILLS_KEY = "cafeq_bills";
+
+function readLocalBills(): StoredReceipt[] {
+  try {
+    return JSON.parse(localStorage.getItem(LOCAL_BILLS_KEY) || "[]");
+  } catch {
+    return [];
+  }
+}
+
+/** The saved bill for an order, if one was generated. */
+export async function getSavedBill(bookingCode: string): Promise<StoredReceipt | null> {
+  const supabase = getPublicClient();
+  if (supabase) {
+    const { data } = await supabase
+      .from("receipts")
+      .select("*")
+      .eq("booking_code", bookingCode)
+      .like("receipt_number", `${BILL_NUMBER_PREFIX}%`)
+      .maybeSingle();
+    const row = data as any;
+    if (row) {
+      return {
+        id: row.id,
+        receiptNumber: row.receipt_number,
+        bookingCode: row.booking_code,
+        orderId: row.order_id || undefined,
+        paymentId: row.payment_id || undefined,
+        paymentMethod: row.payment_method,
+        paymentStatus: "paid",
+        date: "",
+        time: "",
+        customerName: row.customer_name,
+        customerPhone: row.customer_phone,
+        customerEmail: row.customer_email || undefined,
+        tableType: "",
+        partySize: 1,
+        items: row.items || [],
+        subtotal: Number(row.amount) - Number(row.tax_amount || 0),
+        cgst: Number(row.tax_amount || 0) / 2,
+        sgst: Number(row.tax_amount || 0) / 2,
+        taxAmount: Number(row.tax_amount || 0),
+        depositAmount: 0,
+        total: Number(row.amount),
+        totalLabel: "GRAND TOTAL",
+        createdAt: row.created_at,
+        pdfDataUri: row.pdf_data || undefined,
+      };
+    }
+    return null;
+  }
+  return readLocalBills().find((r) => r.bookingCode === bookingCode) || null;
+}
+
+/**
+ * Returns the order's bill, generating and saving it the first time.
+ * Later calls return the same saved bill. Refuses non-completed orders
+ * (the database refuses them too — see 20261031000000_order_status_flow.sql).
+ */
+export async function getOrCreateBill(b: BookingInput): Promise<StoredReceipt> {
+  if (!isBillable(b)) throw new BillNotAllowedError(b.code, b.status);
+  const existing = await getSavedBill(b.code);
+  if (existing) return existing;
+
+  const bill = generateBill(b);
+  const record: StoredReceipt = {
+    ...bill,
+    id: `bill_${b.code}`,
+    pdfDataUri: getReceiptPdfDataUri(bill),
+  };
+
+  const supabase = getPublicClient();
+  if (supabase) {
+    const { error } = await supabase.from("receipts").insert({
+      booking_code: bill.bookingCode,
+      receipt_number: bill.receiptNumber,
+      order_id: bill.orderId || null,
+      payment_id: bill.paymentId || null,
+      payment_method: bill.paymentMethod,
+      amount: bill.total,
+      tax_amount: bill.taxAmount,
+      items: bill.items as any,
+      customer_name: bill.customerName,
+      customer_phone: bill.customerPhone,
+      customer_email: bill.customerEmail || null,
+      pdf_data: record.pdfDataUri,
+    } as any);
+    if (error) {
+      // Another admin generated it at the same moment: use the one that was saved
+      if (error.code === "23505") {
+        const saved = await getSavedBill(b.code);
+        if (saved) return saved;
+      }
+      if (error.message?.startsWith("BILL_NOT_ALLOWED")) throw new BillNotAllowedError(b.code, b.status);
+      throw new Error("Could not save the bill. Please try again.");
+    }
+    return record;
+  }
+
+  try {
+    localStorage.setItem(LOCAL_BILLS_KEY, JSON.stringify([...readLocalBills(), record]));
+  } catch {
+    // Non-browser fallback
+  }
+  return record;
+}
+
+/** Downloads a saved bill exactly as it was generated. */
+export function downloadSavedBill(bill: StoredReceipt): void {
+  if (bill.pdfDataUri && typeof document !== "undefined") {
+    const link = document.createElement("a");
+    link.href = bill.pdfDataUri;
+    link.download = `CafeQ-Bill-${bill.bookingCode}.pdf`;
+    link.click();
+    return;
+  }
+  downloadReceiptPdf(bill);
 }
 
 export async function getReceiptByBookingCode(bookingCode: string): Promise<StoredReceipt | null> {

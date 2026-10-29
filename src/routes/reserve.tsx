@@ -702,7 +702,7 @@ function ReservePage() {
           paymentMethod: prepayActive ? "online_razorpay" : paymentMethod,
           paymentStatus: prepayActive ? "pending_online" : initialPaymentStatus,
           userId: user?.id || null,
-          status: "confirmed",
+          status: "pending",
           kitchenStatus: "new" as const,
         },
       });

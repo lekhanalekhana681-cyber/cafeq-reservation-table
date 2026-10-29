@@ -90,7 +90,7 @@ const bookingSchema = z.object({
   paymentReference: z.string().optional().nullable(),
   userId: z.string().optional().nullable(),
   // pending_payment / expired are set by the database for pre-orders awaiting online payment
-  status: z.enum(["confirmed", "cancelled", "completed", "no_show", "pending_payment", "expired"]).default("confirmed"),
+  status: z.enum(["pending", "confirmed", "cancelled", "completed", "no_show", "pending_payment", "expired"]).default("confirmed"),
   kitchenStatus: z.enum(["new", "preparing", "ready", "completed", "cancelled"]).default("new"),
   orderType: orderTypeSchema.default("DINE_IN"),
   tableNumber: z.string().max(20).optional().nullable(),
@@ -126,7 +126,31 @@ const bookingSchema = z.object({
 import { getOutOfStockItemIds } from "@/lib/stock";
 import { getStoredMenu } from "@/lib/menu";
 
-export type BookingStatus = "confirmed" | "cancelled" | "completed" | "no_show" | "pending_payment" | "expired";
+export type BookingStatus = "pending" | "confirmed" | "cancelled" | "completed" | "no_show" | "pending_payment" | "expired";
+
+/**
+ * Admin order flow: pending → confirmed → completed, no skipping.
+ * Mirrors public.order_status_transition_allowed (20261031000000_order_status_flow.sql).
+ */
+export const ORDER_STATUS_TRANSITIONS: Record<BookingStatus, BookingStatus[]> = {
+  pending: ["confirmed", "cancelled"],
+  confirmed: ["completed", "cancelled", "no_show"],
+  completed: [],
+  cancelled: [],
+  no_show: [],
+  pending_payment: ["cancelled"],
+  expired: ["cancelled"],
+};
+
+export function canTransitionOrderStatus(from: BookingStatus, to: BookingStatus): boolean {
+  return from === to || ORDER_STATUS_TRANSITIONS[from]?.includes(to);
+}
+
+function statusTransitionMessage(from: string, to: string): string {
+  if (from === "pending" && to === "completed") return "Confirm the order before completing it.";
+  if (from === "pending" && to === "no_show") return "Confirm the order before marking a no-show.";
+  return `An order can't go from "${from.replace(/_/g, " ")}" to "${to.replace(/_/g, " ")}".`;
+}
 export type BookingInput = z.infer<typeof bookingSchema>;
 
 import { getSupabaseClient } from "@/integrations/supabase/client";
@@ -335,6 +359,8 @@ export async function createBooking({ data }: { data: BookingInput }) {
     cancelledAt: null,
   }));
   validated.kitchenStatus = "new";
+  // Every new order waits for an admin to confirm it (the database enforces this too)
+  validated.status = "pending";
   validated.createdAt = new Date().toISOString();
 
   // ─── Order type rules (mirrored by the enforce_order_type_rules DB trigger) ───
@@ -785,6 +811,11 @@ function paymentGuardMessage(message: string): string {
     return "This pre-order has been paid. Cancel it through My Bookings (refund policy applies) or Admin › Payments.";
   }
   if (message.startsWith("PAYMENT_REQUIRED")) return "This pre-order hasn't been paid yet.";
+  if (message.startsWith("INVALID_STATUS_TRANSITION")) {
+    const [from, to] = message.slice("INVALID_STATUS_TRANSITION:".length).split("->").map((s) => s.trim());
+    return statusTransitionMessage(from || "", to || "");
+  }
+  if (message.startsWith("ORDER_NOT_CONFIRMED")) return "Confirm the order first.";
   if (message.startsWith("PAYMENT_FIELDS_READ_ONLY")) return "Payment details can only be changed by the payment system.";
   return "Could not update the booking. Please try again.";
 }
@@ -965,6 +996,12 @@ export async function updateBookingStatus({
       console.error("updateBookingStatus error:", error);
       return { success: false, error: paymentGuardMessage(error.message) };
     }
+  } else {
+    // Local mode: same flow rules the database enforces
+    const current = safeGetBookings().find((b) => b.code === code);
+    if (current && !canTransitionOrderStatus(current.status || "confirmed", status)) {
+      return { success: false, error: statusTransitionMessage(current.status || "confirmed", status) };
+    }
   }
 
   try {
@@ -975,6 +1012,8 @@ export async function updateBookingStatus({
     console.error("Failed to update status in storage:", err);
   }
 
+  // Confirming releases the order to the KDS; refresh other screens in this browser
+  emitKitchenEvent("ORDER_STATUS_CHANGED", { code, bookingStatus: status });
   return { success: true };
 }
 
@@ -1061,6 +1100,7 @@ async function rpcErrorToResult(code: string, error: { code?: string; message: s
   if (msg.startsWith("INVALID_TRANSITION")) return { success: false, error: "That status change isn't allowed for this item." };
   if (msg.startsWith("ORDER_CANCELLED")) return { success: false, error: "This order has been cancelled." };
   if (msg.startsWith("PAYMENT_REQUIRED")) return { success: false, error: "This pre-order hasn't been paid yet." };
+  if (msg.startsWith("ORDER_NOT_CONFIRMED")) return { success: false, error: "This order hasn't been confirmed by the admin yet." };
   if (msg.startsWith("PAID_ORDER_USE_PAYMENTS")) {
     return { success: false, error: "This is a paid pre-order — cancel it from Admin › Payments so the deposit is refunded." };
   }
@@ -1120,6 +1160,9 @@ export async function setOrderItemsStatus({
     if (error || !data) return rpcErrorToResult(code, error ?? { message: "" });
     updated = withKitchenState(mapBookingRow(data as BookingRow));
   } else {
+    if (before.status === "pending") {
+      return { success: false, error: "This order hasn't been confirmed by the admin yet." };
+    }
     if (before.status === "cancelled" && status !== "CANCELLED") {
       return { success: false, error: "This order has been cancelled." };
     }
