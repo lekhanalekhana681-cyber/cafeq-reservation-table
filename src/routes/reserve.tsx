@@ -98,6 +98,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { PageBackground } from "@/components/PageBackground";
+import { ReservationChatbot } from "@/components/ReservationChatbot";
 
 export const Route = createFileRoute("/reserve")({
   // `table` comes from the on-table QR code (e.g. /reserve?table=T-04); aliases kept for older printed codes
@@ -2581,6 +2582,8 @@ function ReservePage() {
         </aside>
       </div>
     </form>
+
+    <ReservationChatbot />
 
     {/* ─── 18+ Cocktail Age Confirmation Modal ─── */}
     {ageConfirmItem && (
