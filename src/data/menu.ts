@@ -1101,7 +1101,21 @@ export type TableType = {
   maxCapacity: number;
   totalTables: number;
   tag: string;
+  /** Card photo (public/images/tables/) */
+  image: string;
+  /** Descriptive alt text for the photo */
+  imageAlt: string;
 };
+
+/**
+ * Table photos — free to use, downloaded into public/images/tables/ (800×500):
+ * - window-2top.jpg       Unsplash (Unsplash License) https://images.unsplash.com/photo-1445116572660-236099ec97a0
+ * - cozy-booth.jpg        Unsplash (Unsplash License) https://images.unsplash.com/photo-1537047902294-62a40c20a6ae
+ * - garden-courtyard.jpg  Pexels (Pexels License)     https://www.pexels.com/photo/charming-outdoor-cafe-with-brick-walls-32989060/
+ * - communal-table.jpg    Unsplash (Unsplash License) https://images.unsplash.com/photo-1521737604893-d14cc237f11d
+ * - espresso-bar.jpg      Unsplash (Unsplash License) https://images.unsplash.com/photo-1453614512568-c4024d13c247
+ */
+export const TABLE_IMAGE_PLACEHOLDER = "/images/tables/placeholder.svg";
 
 export const tableTypes: TableType[] = [
   {
@@ -1112,6 +1126,8 @@ export const tableTypes: TableType[] = [
     maxCapacity: 2,
     totalTables: 5,
     tag: "High Demand",
+    image: "/images/tables/window-2top.jpg",
+    imageAlt: "Small wooden cafe table for two beside a sunlit street-view window",
   },
   {
     id: "booth",
@@ -1121,6 +1137,8 @@ export const tableTypes: TableType[] = [
     maxCapacity: 4,
     totalTables: 4,
     tag: "Comfort",
+    image: "/images/tables/cozy-booth.jpg",
+    imageAlt: "Upholstered cafe booth with warm lighting and plants",
   },
   {
     id: "courtyard",
@@ -1130,6 +1148,8 @@ export const tableTypes: TableType[] = [
     maxCapacity: 6,
     totalTables: 4,
     tag: "Outdoor",
+    image: "/images/tables/garden-courtyard.jpg",
+    imageAlt: "Outdoor cafe terrace with wooden tables, brick walls and potted greenery",
   },
   {
     id: "communal",
@@ -1139,6 +1159,8 @@ export const tableTypes: TableType[] = [
     maxCapacity: 8,
     totalTables: 6,
     tag: "Work & Social",
+    image: "/images/tables/communal-table.jpg",
+    imageAlt: "Long shared wooden table with guests working on laptops",
   },
   {
     id: "counter",
@@ -1148,5 +1170,7 @@ export const tableTypes: TableType[] = [
     maxCapacity: 2,
     totalTables: 6,
     tag: "Quick Brew",
+    image: "/images/tables/espresso-bar.jpg",
+    imageAlt: "Espresso bar counter with stools in front of the barista station",
   },
 ];
