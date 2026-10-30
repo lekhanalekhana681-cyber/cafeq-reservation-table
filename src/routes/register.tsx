@@ -3,6 +3,12 @@ import { useState } from "react";
 import { Eye, EyeOff, UserPlus, Coffee, ShieldCheck, ArrowRight } from "lucide-react";
 import { toast } from "sonner";
 import { useAuth } from "@/context/AuthContext";
+import {
+  REGISTRATION_PATTERNS,
+  isValidRegistrationEmail,
+  isValidRegistrationPassword,
+  isValidRegistrationPhone,
+} from "@/lib/auth";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -44,16 +50,16 @@ function RegisterPage() {
       setErrorMessage("Please enter your full name.");
       return;
     }
-    if (!email.trim()) {
-      setErrorMessage("Please enter your email address.");
+    if (!isValidRegistrationEmail(email)) {
+      setErrorMessage("Please enter a valid email address (e.g. name@gmail.com).");
       return;
     }
-    if (!phone.trim()) {
-      setErrorMessage("Please enter your phone number.");
+    if (!isValidRegistrationPhone(phone)) {
+      setErrorMessage("Phone number must be exactly 10 digits (numbers only).");
       return;
     }
-    if (password.length < 6) {
-      setErrorMessage("Password must be at least 6 characters long.");
+    if (!isValidRegistrationPassword(password)) {
+      setErrorMessage("Password must be at least 8 characters and include an uppercase letter.");
       return;
     }
     if (password !== confirmPassword) {
@@ -136,16 +142,21 @@ function RegisterPage() {
               <Label htmlFor="email" className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
                 Email Address
               </Label>
+              {/* type="text" + pattern so the browser shows "Please match the requested format." */}
               <Input
                 id="email"
-                type="email"
+                type="text"
+                inputMode="email"
                 required
+                pattern={REGISTRATION_PATTERNS.email}
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder="jane@example.com"
                 className="mt-1.5"
                 autoComplete="email"
+                aria-describedby="email-hint"
               />
+              <p id="email-hint" className="mt-1 text-[11px] text-muted-foreground">Format: name@example.com</p>
             </div>
 
             <div>
@@ -155,13 +166,18 @@ function RegisterPage() {
               <Input
                 id="phone"
                 type="tel"
+                inputMode="numeric"
                 required
+                pattern={REGISTRATION_PATTERNS.phone}
+                maxLength={10}
                 value={phone}
                 onChange={(e) => setPhone(e.target.value)}
-                placeholder="+91 98765 43210"
+                placeholder="9876543210"
                 className="mt-1.5"
-                autoComplete="tel"
+                autoComplete="tel-national"
+                aria-describedby="phone-hint"
               />
+              <p id="phone-hint" className="mt-1 text-[11px] text-muted-foreground">Exactly 10 digits, numbers only</p>
             </div>
 
             <div>
@@ -173,11 +189,13 @@ function RegisterPage() {
                   id="password"
                   type={showPassword ? "text" : "password"}
                   required
+                  pattern={REGISTRATION_PATTERNS.password}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  placeholder="At least 6 characters"
+                  placeholder="At least 8 characters"
                   className="pr-10"
                   autoComplete="new-password"
+                  aria-describedby="password-hint"
                 />
                 <button
                   type="button"
@@ -188,6 +206,9 @@ function RegisterPage() {
                   {showPassword ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
                 </button>
               </div>
+              <p id="password-hint" className="mt-1 text-[11px] text-muted-foreground">
+                At least 8 characters, including one uppercase letter
+              </p>
             </div>
 
             <div>
