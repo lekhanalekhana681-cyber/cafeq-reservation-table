@@ -164,7 +164,7 @@ async function runTests() {
     paymentStatus: "paid",
     date: "2026-10-18",
     time: "19:00",
-    customerName: "Priya Sharma",
+    customerName: "Priya Nair",
     customerPhone: "+91 98765 43210",
     customerEmail: "priya@example.com",
     tableType: "Indoor Booth",
@@ -184,7 +184,7 @@ async function runTests() {
 
   const retrieved = await getReceiptByBookingCode("BK-STORE1");
   assert(retrieved !== null, "Receipt retrieved by booking code");
-  assert(retrieved?.customerName === "Priya Sharma", "Retrieved receipt customer name matches");
+  assert(retrieved?.customerName === "Priya Nair", "Retrieved receipt customer name matches");
   assert(retrieved?.total === 950, "Retrieved receipt grand total matches");
 
   // ─── 5. PDF Data URI Generation ───

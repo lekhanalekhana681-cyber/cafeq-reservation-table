@@ -174,7 +174,7 @@ async function runTests() {
       tableType: "window",
       hasPreorder: true,
       estimatedPrepTime: 12,
-      name: "Rohit Sharma",
+      name: "Rohit Menon",
       phone: "+91 98888 77777",
       notes: "Extra spicy fries, allergy to peanuts",
       items: [
