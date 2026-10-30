@@ -4,10 +4,7 @@ import type { Database } from "@/integrations/supabase/types";
 import { emitKitchenEvent, playNewOrderSound } from "@/lib/kitchen.sync";
 import { sendWhatsAppMessage, sendSms } from "@/lib/notifications.functions";
 import { dispatchNotification } from "@/lib/notifications";
-import { verifyRazorpayPaymentSignature } from "@/lib/razorpay.service";
 import {
-  storeReceipt,
-  generateReceiptNumber,
   getOrCreateBill,
   getSavedBill,
   BillNotAllowedError,
@@ -35,6 +32,12 @@ import {
 } from "@/lib/order-items";
 import { getKitchenSession } from "@/lib/auth";
 import type { PaymentState } from "@/lib/prepayment";
+import {
+  getAllowedPaymentMethods,
+  isOnlinePaymentMethod,
+  orderHasPreOrder,
+  PAYMENT_METHODS,
+} from "@/lib/payment-methods";
 
 export const orderItemSchema = z.object({
   id: z.string(),
@@ -92,7 +95,7 @@ const bookingSchema = z.object({
   windowPriority: z.boolean().default(false),
   items: z.array(orderItemSchema).max(50).default([]),
   total: z.number().int().min(0).default(0),
-  paymentMethod: z.enum(["pay_on_arrival", "upi_prepay", "online_razorpay"]).default("pay_on_arrival"),
+  paymentMethod: z.enum(["pay_on_arrival", "upi_prepay", "online_razorpay", "upi_razorpay"]).default("pay_on_arrival"),
   paymentStatus: z.enum(["pending_cash", "pending_qr", "pending_online", "paid", "failed", "refunded"]).default("pending_cash"),
   paymentReference: z.string().optional().nullable(),
   userId: z.string().optional().nullable(),
@@ -413,6 +416,23 @@ export async function createBooking({ data }: { data: BookingInput }) {
   const validated = bookingSchema.parse(data);
   const supabase = getPublicClient();
 
+  // Food pre-orders are paid online only (Razorpay or UPI) — never cash.
+  // The database enforces the same rule (check_payment_method_rules).
+  const hasPreOrder = orderHasPreOrder(validated.items);
+  if (hasPreOrder && !(data as Partial<BookingInput>).paymentMethod) {
+    validated.paymentMethod = "online_razorpay";
+  }
+  if (hasPreOrder && !getAllowedPaymentMethods(true).includes(validated.paymentMethod)) {
+    throw new Error(
+      PAYMENT_METHODS[validated.paymentMethod].cash
+        ? "Cash payment is not available for food pre-orders. Please pay online with Razorpay or UPI."
+        : "Food pre-orders must be paid online with Razorpay or UPI."
+    );
+  }
+  if (isOnlinePaymentMethod(validated.paymentMethod) && validated.paymentStatus !== "paid") {
+    validated.paymentStatus = "pending_online";
+  }
+
   // New orders always start in the kitchen queue with every item pending
   validated.items = validated.items.map((item) => ({
     ...item,
@@ -666,153 +686,6 @@ export async function createBooking({ data }: { data: BookingInput }) {
   }).catch((err) => console.warn("Activity logging error:", err));
 
   return { code: validated.code };
-}
-
-// ─── Razorpay Online Payment Verification & Receipt Flow ───────────────────────
-
-export async function verifyAndCompleteRazorpayPayment({
-  code,
-  orderId,
-  paymentId,
-  signature,
-}: {
-  code: string;
-  orderId: string;
-  paymentId: string;
-  signature: string;
-}): Promise<{ success: boolean; error?: string; receipt?: any }> {
-  // 1. Verify signature
-  const verification = await verifyRazorpayPaymentSignature({
-    orderId,
-    paymentId,
-    signature,
-  });
-
-  if (!verification.verified) {
-    // Record failed payment attempt
-    await updateBookingPaymentStatus({
-      code,
-      status: "failed",
-      reference: paymentId,
-    });
-    return { success: false, error: verification.error || "Payment verification failed" };
-  }
-
-  // 2. Fetch booking details to compute receipt
-  let booking: BookingInput | null = null;
-  const supabase = getPublicClient();
-  if (supabase) {
-    const { data } = await supabase.from("bookings").select("*").eq("code", code).maybeSingle();
-    if (data) {
-      booking = {
-        code: data.code,
-        date: data.date,
-        time: data.time,
-        party: data.party,
-        seating: data.seating,
-        tableType: data.table_type || "window",
-        hasPreorder: data.has_preorder || false,
-        estimatedPrepTime: data.estimated_prep_time || 0,
-        foodReadyTime: data.food_ready_time || null,
-        isPeakHour: data.is_peak_hour || false,
-        depositRequired: data.deposit_required || false,
-        depositAmount: data.deposit_amount || 0,
-        kitchenLoad: (data.kitchen_load as any) || "normal",
-        name: data.name,
-        phone: data.phone,
-        customerEmail: data.customer_email || undefined,
-        notes: data.notes || undefined,
-        dietary: data.dietary || [],
-        occasion: data.occasion || undefined,
-        accessibility: data.accessibility || [],
-        windowPriority: data.window_priority || false,
-        items: (data.items as any) || [],
-        total: data.total || 0,
-        paymentMethod: "online_razorpay",
-        paymentStatus: "paid",
-        paymentReference: paymentId,
-        userId: data.user_id || undefined,
-        ...mapOrderTypeFields(data),
-        status: (data.status as any) || "confirmed",
-      };
-    }
-  }
-
-  if (!booking) {
-    try {
-      const existing: BookingInput[] = JSON.parse(localStorage.getItem("cafeq_bookings") || "[]");
-      booking = existing.find((b) => b.code === code) || null;
-    } catch {
-      // Local error
-    }
-  }
-
-  // 3. Mark payment as paid in DB & localStorage
-  await updateBookingPaymentStatus({
-    code,
-    status: "paid",
-    reference: paymentId,
-  });
-
-  if (!booking) {
-    return { success: true };
-  }
-
-  // 4. Calculate Taxes and Generate Digital Receipt
-  const total = booking.total;
-  const deposit = booking.depositAmount || 0;
-  const itemsTotal = total - deposit;
-  const taxAmount = Math.round(itemsTotal * 0.05 * 100) / 100; // 5% GST
-  const subtotal = itemsTotal - taxAmount;
-  const cgst = Math.round((taxAmount / 2) * 100) / 100;
-  const sgst = Math.round((taxAmount / 2) * 100) / 100;
-  const receiptNumber = generateReceiptNumber(code);
-
-  const receiptRecord = await storeReceipt({
-    receiptNumber,
-    bookingCode: code,
-    orderId,
-    paymentId,
-    paymentMethod: "Razorpay (Online UPI/Card/Wallet)",
-    paymentStatus: "paid",
-    date: booking.date,
-    time: booking.time,
-    customerName: booking.name,
-    customerPhone: booking.phone,
-    customerEmail: booking.customerEmail,
-    tableType: booking.tableType,
-    partySize: booking.party,
-    items: booking.items || [],
-    subtotal: Math.max(0, subtotal),
-    cgst,
-    sgst,
-    taxAmount,
-    depositAmount: deposit,
-    total,
-    createdAt: new Date().toISOString(),
-  });
-
-  // 5. Trigger payment_success notification with PDF receipt attached
-  dispatchNotification("payment_success", {
-    bookingCode: code,
-    customerName: booking.name,
-    customerPhone: booking.phone,
-    customerEmail: booking.customerEmail,
-    totalAmount: total,
-    receiptNumber,
-    paymentId,
-    attachments: receiptRecord.pdfDataUri
-      ? [
-          {
-            filename: `CafeQ-Receipt-${code}.pdf`,
-            contentType: "application/pdf",
-            dataUri: receiptRecord.pdfDataUri,
-          },
-        ]
-      : undefined,
-  }).catch((err) => console.warn("Background payment success notification error:", err));
-
-  return { success: true, receipt: receiptRecord };
 }
 
 // Update payment status (e.g. Mark as Paid for QR code or Razorpay)

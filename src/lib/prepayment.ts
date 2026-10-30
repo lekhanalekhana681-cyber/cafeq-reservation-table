@@ -216,7 +216,11 @@ async function postJson<T>(path: string, body: unknown, token?: string): Promise
   return data as T;
 }
 
+export type CheckoutMethod = "razorpay" | "upi";
+
 export type CreatePaymentOrderResponse = {
+  method: CheckoutMethod;
+  kind: "deposit" | "full";
   keyId: string;
   testMode: boolean;
   razorpayOrderId: string;
@@ -227,8 +231,8 @@ export type CreatePaymentOrderResponse = {
   order: PaymentOrderSummary;
 };
 
-export const createPaymentOrder = (code: string) =>
-  postJson<CreatePaymentOrderResponse>("/api/payments/create-order", { code });
+export const createPaymentOrder = (code: string, method: CheckoutMethod = "razorpay") =>
+  postJson<CreatePaymentOrderResponse>("/api/payments/create-order", { code, method });
 
 export const verifyPayment = (code: string, payment: RazorpayPaymentSuccessResponse) =>
   postJson<{ order: PaymentOrderSummary; receipt: PaymentReceipt; refunded: boolean }>("/api/payments/verify", {
@@ -252,14 +256,40 @@ export type CheckoutOutcome =
   | { status: "dismissed" }
   | { status: "failed"; message: string };
 
+/** Razorpay Checkout display config: UPI only, or cards/netbanking/wallets without UPI. */
+function checkoutDisplayConfig(method: CheckoutMethod) {
+  return method === "upi"
+    ? {
+        display: {
+          blocks: { upi: { name: "Pay with UPI", instruments: [{ method: "upi" }] } },
+          sequence: ["block.upi"],
+          preferences: { show_default_blocks: false },
+        },
+      }
+    : { display: { hide: [{ method: "upi" }], preferences: { show_default_blocks: true } } };
+}
+
+const log = (...args: unknown[]) => console.info("[payments]", ...args);
+
 /**
- * Opens Razorpay Checkout for an unpaid pre-order and verifies the result on the server.
- * The amount and Razorpay order come from the server; nothing here sets a price.
+ * Opens Razorpay Checkout for an order paying online (pre-order deposit or full payment)
+ * and verifies the result on the server. Flow:
+ *   create order (server: razorpay.orders.create, amount from the DB) → Checkout → verify
+ *   signature (server, HMAC-SHA256) → order marked paid.
+ * Nothing here sets a price, and the key secret never reaches the browser.
  */
-export async function payForPreorder(code: string): Promise<CheckoutOutcome> {
-  const [loaded, order] = await Promise.all([loadRazorpayScript(), createPaymentOrder(code)]);
+export async function payOnline(
+  code: string,
+  method: CheckoutMethod = "razorpay",
+  opts: { onOrderCreated?: (order: CreatePaymentOrderResponse) => void } = {}
+): Promise<CheckoutOutcome> {
+  log(`1/4 creating Razorpay order for ${code} (${method})`);
+  const [loaded, order] = await Promise.all([loadRazorpayScript(), createPaymentOrder(code, method)]);
+  log(`2/4 order ${order.razorpayOrderId}: ${order.amountPaise} paise, ${order.kind}, key ${order.keyId.slice(0, 9)}… (${order.testMode ? "test" : "live"} mode)`);
+  opts.onOrderCreated?.(order);
   const Razorpay = typeof window !== "undefined" ? (window as any).Razorpay : undefined;
   if (!loaded || !Razorpay) {
+    console.error("[payments] Razorpay checkout.js failed to load");
     return { status: "failed", message: "Couldn't load Razorpay Checkout. Disable ad blockers and try again." };
   }
 
@@ -280,17 +310,26 @@ export async function payForPreorder(code: string): Promise<CheckoutOutcome> {
       amount: order.amountPaise,
       currency: order.currency,
       name: "CafeQ",
-      description: `Pre-order ${code}`,
-      prefill: { name: order.customer.name, email: order.customer.email, contact: order.customer.phone },
+      description: order.kind === "deposit" ? `Pre-order deposit ${code}` : `Order ${code}`,
+      prefill: {
+        name: order.customer.name,
+        email: order.customer.email,
+        contact: order.customer.phone,
+        ...(method === "upi" ? { method: "upi" } : {}),
+      },
       notes: { booking_code: code },
       theme: { color: "#c2410c" },
+      config: checkoutDisplayConfig(method),
       // Close Checkout when the 15-minute payment window ends (Razorpay minimum is 60s)
       ...(secondsLeft > 60 ? { timeout: secondsLeft } : {}),
       handler: async (response: RazorpayPaymentSuccessResponse) => {
+        log(`3/4 payment ${response.razorpay_payment_id} completed, verifying signature on the server`);
         try {
           const verified = await verifyPayment(code, response);
+          log(`4/4 verified — order ${code} is ${verified.order.paymentState}`);
           settle({ status: "paid", order: verified.order, receipt: verified.receipt });
         } catch (err) {
+          console.error("[payments] verification failed:", err);
           settle({
             status: "failed",
             message:
@@ -301,15 +340,22 @@ export async function payForPreorder(code: string): Promise<CheckoutOutcome> {
         }
       },
       modal: {
-        ondismiss: () => settle(lastError ? { status: "failed", message: lastError } : { status: "dismissed" }),
+        ondismiss: () => {
+          log(`checkout closed for ${code}${lastError ? ` after a failed attempt: ${lastError}` : " without paying"}`);
+          settle(lastError ? { status: "failed", message: lastError } : { status: "dismissed" });
+        },
       },
     });
     // Checkout stays open after a failed attempt so the customer can retry in place;
     // only report the failure if they close it without a successful payment.
     let lastError: string | null = null;
     rzp.on("payment.failed", (response: any) => {
+      console.warn("[payments] payment attempt failed:", response?.error?.code, response?.error?.description);
       lastError = response?.error?.description || "The payment failed. Please try again.";
     });
     rzp.open();
   });
 }
+
+/** Pre-order deposit checkout (kept for existing callers). */
+export const payForPreorder = (code: string, method: CheckoutMethod = "razorpay") => payOnline(code, method);

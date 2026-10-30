@@ -31,6 +31,9 @@ const DB_ERRORS = {
   UNKNOWN_MENU_ITEM: [400, "An item in your order is no longer on the menu."],
   ITEM_UNAVAILABLE: [409, "An item in your order is out of stock."],
   INVALID_QUANTITY: [400, "Invalid item quantity."],
+  NOTHING_TO_PAY: [400, "There's nothing to pay online for this order."],
+  NOT_PAYABLE: [409, "This order can no longer be paid."],
+  NOT_AN_ONLINE_ORDER: [400, "This order isn't set up for online payment."],
 };
 
 export function toPaymentError(err) {

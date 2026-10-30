@@ -12,6 +12,10 @@ import { verifyWebhookSignature } from "./razorpay.js";
 
 const digits = (s) => String(s || "").replace(/\D/g, "").slice(-10);
 
+// Checkout methods the server accepts (mirrors src/lib/payment-methods.ts)
+const ONLINE_METHODS = new Set(["razorpay", "upi"]);
+const CASH_METHODS = new Set(["cash", "pay_on_arrival", "cod", "pay_at_cafe"]);
+
 export function createPaymentService({ db, razorpay, webhookSecret, notify = async () => {} }) {
   const run = async (fn) => {
     try {
@@ -84,16 +88,26 @@ export function createPaymentService({ db, razorpay, webhookSecret, notify = asy
 
   return {
     /** Creates (or reuses) the Razorpay order for an unpaid pre-order. Amount comes from the DB. */
-    createOrder: ({ code }) =>
+    createOrder: ({ code, method = "razorpay" }) =>
       run(async () => {
         if (!code) throw new PaymentError(400, "BAD_REQUEST", "Missing order code.");
+        if (CASH_METHODS.has(method)) {
+          console.warn(`[payments] create-order ${code}: cash method "${method}" rejected`);
+          throw new PaymentError(400, "CASH_NOT_ALLOWED_FOR_PREORDER", "Cash payment is not available for food pre-orders. Please pay online with Razorpay or UPI.");
+        }
+        if (!ONLINE_METHODS.has(method)) {
+          throw new PaymentError(400, "BAD_REQUEST", "Choose Razorpay or UPI.");
+        }
         const prep = await db.rpc("pay_prepare_checkout", { _code: code });
         let razorpayOrderId = prep.razorpay_order_id;
-        if (!razorpayOrderId) {
+        if (razorpayOrderId) {
+          console.info(`[payments] create-order ${code}: reusing Razorpay order ${razorpayOrderId} (${prep.amount_paise} paise)`);
+        } else {
           const order = await razorpay.createOrder({
             amountPaise: prep.amount_paise,
-            receipt: code,
-            notes: { booking_code: code, kind: prep.kind },
+            // Unique per Razorpay order (max 40 chars)
+            receipt: `${code}-${Date.now().toString(36)}`.slice(0, 40),
+            notes: { booking_code: code, kind: prep.kind, method },
           });
           if (order.amount !== prep.amount_paise) {
             throw new PaymentError(502, "GATEWAY_ERROR", "The payment gateway returned a different amount.");
@@ -102,9 +116,12 @@ export function createPaymentService({ db, razorpay, webhookSecret, notify = asy
             _code: code, _razorpay_order_id: order.id, _amount_paise: prep.amount_paise, _kind: prep.kind,
           });
           razorpayOrderId = order.id;
+          console.info(`[payments] create-order ${code}: Razorpay order ${order.id} created for ${prep.amount_paise} paise (${prep.kind}, ${method})`);
         }
         const b = prep.booking;
         return {
+          method,
+          kind: prep.kind,
           keyId: razorpay.keyId,
           testMode: razorpay.isTestMode,
           razorpayOrderId,
@@ -119,7 +136,9 @@ export function createPaymentService({ db, razorpay, webhookSecret, notify = asy
     /** Checkout success callback: verify signature, confirm with Razorpay, then mark paid. */
     verify: ({ code, razorpay_order_id, razorpay_payment_id, razorpay_signature }) =>
       run(async () => {
+        console.info(`[payments] verify ${code}: order ${razorpay_order_id}, payment ${razorpay_payment_id}`);
         if (!razorpay.verifyPaymentSignature({ orderId: razorpay_order_id, paymentId: razorpay_payment_id, signature: razorpay_signature })) {
+          console.warn(`[payments] verify ${code}: signature mismatch`);
           throw new PaymentError(400, "INVALID_SIGNATURE", "We couldn't verify this payment. If money was debited it will be confirmed automatically or refunded.");
         }
         let payment = await razorpay.fetchPayment(razorpay_payment_id);
@@ -138,6 +157,9 @@ export function createPaymentService({ db, razorpay, webhookSecret, notify = asy
         if (code && res.booking.code !== code) {
           throw new PaymentError(400, "INVALID_SIGNATURE", "This payment doesn't belong to the order.");
         }
+        console.info(
+          `[payments] verify ${res.booking.code}: ${res.alreadyProcessed ? "already recorded" : "captured"} ${payment.amount} paise via ${payment.method} → ${res.booking.payment_state}`
+        );
         return {
           order: summary(res.booking),
           refunded: res.refunded,
@@ -166,6 +188,7 @@ export function createPaymentService({ db, razorpay, webhookSecret, notify = asy
         const id = eventId || `${evt.event}:${refund?.id || payment?.id}`;
 
         const fresh = await db.rpc("pay_register_event", { _event_id: id, _event: evt.event });
+        console.info(`[payments] webhook ${evt.event} ${id}${fresh ? "" : " (duplicate, ignored)"}`);
         if (!fresh) return { duplicate: true };
 
         try {

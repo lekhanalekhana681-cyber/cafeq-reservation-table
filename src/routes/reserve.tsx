@@ -23,6 +23,7 @@ import {
   Download,
   FileText,
   Banknote,
+  Smartphone,
   ShoppingBag,
   Bike,
   MapPin,
@@ -59,7 +60,8 @@ import {
   formatPaise,
   isPreorder,
   istToday,
-  payForPreorder,
+  payOnline,
+  type CheckoutMethod,
   PAYMENT_WINDOW_MINUTES,
   refundCutoffMs,
   refundPolicyText,
@@ -77,11 +79,9 @@ import {
   getPublicClient,
   getUserBookings,
   updateBookingPaymentStatus,
-  verifyAndCompleteRazorpayPayment,
   type OrderItem,
 } from "@/lib/bookings.functions";
 import { sendBookingConfirmationNotifications } from "@/lib/notifications.functions";
-import { openRazorpayCheckout } from "@/lib/razorpay.service";
 import { downloadReceiptPdf, getReceiptByBookingCode, type StoredReceipt } from "@/lib/receipt.service";
 import { getCafeSettings } from "@/lib/settings.functions";
 import { Button } from "@/components/ui/button";
@@ -99,6 +99,15 @@ import {
 } from "@/components/ui/select";
 import { PageBackground } from "@/components/PageBackground";
 import { ReservationChatbot } from "@/components/ReservationChatbot";
+import {
+  getAllowedPaymentMethods,
+  isOnlinePaymentMethod,
+  orderHasPreOrder,
+  PAYMENT_METHODS,
+  resolvePaymentMethod,
+  type PaymentMethodId,
+} from "@/lib/payment-methods";
+import { loadRazorpayScript } from "@/lib/razorpay.service";
 
 export const Route = createFileRoute("/reserve")({
   // `table` comes from the on-table QR code (e.g. /reserve?table=T-04); aliases kept for older printed codes
@@ -390,7 +399,7 @@ function ReservePage() {
   // Cart
   const [cart, setCart] = useState<Record<string, CartItemState>>({});
   // Payment: online_razorpay vs upi_prepay vs pay_on_arrival
-  const [paymentMethod, setPaymentMethod] = useState<"online_razorpay" | "upi_prepay" | "pay_on_arrival">("online_razorpay");
+  const [paymentMethod, setPaymentMethod] = useState<PaymentMethodId>("online_razorpay");
   const [code, setCode] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
@@ -399,6 +408,9 @@ function ReservePage() {
   const [payingNow, setPayingNow] = useState(false);
   const [preorderPay, setPreorderPay] = useState<{
     status: "awaiting" | "paid" | "expired";
+    /** deposit = pre-order deposit; full = whole order paid online */
+    kind: "deposit" | "full";
+    method: CheckoutMethod;
     duePaise: number;
     totalPaise: number;
     expiresAt: string | null;
@@ -412,7 +424,6 @@ function ReservePage() {
   const [qrPaymentStatus, setQrPaymentStatus] = useState<"pending" | "paid">("pending");
   const [txnRef, setTxnRef] = useState("");
   const [markingPaid, setMarkingPaid] = useState(false);
-  const [payingOnline, setPayingOnline] = useState(false);
   const [receiptData, setReceiptData] = useState<StoredReceipt | null>(null);
 
   useEffect(() => {
@@ -520,6 +531,24 @@ function ReservePage() {
     settings.preorderPaymentMode !== "NONE" &&
     isPreorder({ orderType, date, time, pickupTime, items });
   const prepayFull = settings.preorderPaymentMode === "FULL";
+
+  // Payment methods follow the cart: food pre-order → Razorpay / UPI only; table only → all options
+  const hasFoodPreOrder = orderHasPreOrder(items);
+  const allowedPaymentMethods = getAllowedPaymentMethods(hasFoodPreOrder);
+  useEffect(() => {
+    const next = resolvePaymentMethod(paymentMethod, hasFoodPreOrder);
+    if (next !== paymentMethod) {
+      setPaymentMethod(next);
+      if (PAYMENT_METHODS[paymentMethod].cash) {
+        toast.info("Food pre-orders are paid online, so we switched your payment to Razorpay.");
+      }
+    }
+  }, [hasFoodPreOrder, paymentMethod]);
+
+  // Load Razorpay Checkout early so the Pay button opens instantly
+  useEffect(() => {
+    loadRazorpayScript();
+  }, []);
 
   // The old fixed table deposit is replaced by the pre-order deposit
   const depositAmount =
@@ -654,15 +683,27 @@ function ReservePage() {
       return;
     }
 
+    if (!allowedPaymentMethods.includes(paymentMethod)) {
+      toast.error("Food pre-orders are paid online — please choose Razorpay or UPI.");
+      return;
+    }
+    const payingOnlineNow = isOnlinePaymentMethod(paymentMethod);
+    if (payingOnlineNow && !getPublicClient()) {
+      // Online payments need the database + /api functions (deployed site or `vercel dev`)
+      toast.error("Online payment isn't available on this server yet. Please contact the cafe.");
+      console.error("[payments] Supabase is not configured (VITE_SUPABASE_URL); online payments are disabled.");
+      return;
+    }
+
     if (submitting) return;
     setSubmitting(true);
     const bookingCode = genCode();
-    const initialPaymentStatus =
-      paymentMethod === "online_razorpay"
-        ? "pending_online"
-        : paymentMethod === "upi_prepay"
-        ? "pending_qr"
-        : "pending_cash";
+    const initialPaymentStatus = payingOnlineNow
+      ? "pending_online"
+      : paymentMethod === "upi_prepay"
+      ? "pending_qr"
+      : "pending_cash";
+    const checkoutMethod: CheckoutMethod = PAYMENT_METHODS[paymentMethod].checkoutMethod ?? "razorpay";
 
     try {
       const created = await createBooking({
@@ -700,8 +741,8 @@ function ReservePage() {
           windowPriority,
           items,
           total: totalWithDeposit,
-          paymentMethod: prepayActive ? "online_razorpay" : paymentMethod,
-          paymentStatus: prepayActive ? "pending_online" : initialPaymentStatus,
+          paymentMethod,
+          paymentStatus: initialPaymentStatus,
           userId: user?.id || null,
           status: "pending",
           kitchenStatus: "new" as const,
@@ -713,13 +754,32 @@ function ReservePage() {
         setCode(bookingCode);
         setPreorderPay({
           status: "awaiting",
+          kind: "deposit",
+          method: checkoutMethod,
           duePaise: created.payment.depositDuePaise ?? 0,
           totalPaise: created.payment.totalAmountPaise,
           expiresAt: created.payment.paymentExpiresAt,
           scheduledAt: created.payment.scheduledAt,
         });
         setSubmitting(false);
-        await startPreorderPayment(bookingCode);
+        await startPreorderPayment(bookingCode, checkoutMethod);
+        return;
+      }
+
+      // Any other online payment: pay the full order now through the same verified flow
+      if (payingOnlineNow) {
+        setCode(bookingCode);
+        setPreorderPay({
+          status: "awaiting",
+          kind: "full",
+          method: checkoutMethod,
+          duePaise: totalWithDeposit * 100, // replaced by the server amount once the order is created
+          totalPaise: totalWithDeposit * 100,
+          expiresAt: null,
+          scheduledAt: null,
+        });
+        setSubmitting(false);
+        await startPreorderPayment(bookingCode, checkoutMethod);
         return;
       }
 
@@ -755,15 +815,25 @@ function ReservePage() {
     }
   };
 
-  /** Opens Razorpay for a parked pre-order; the server verifies before the kitchen sees it. */
-  const startPreorderPayment = async (bookingCode: string) => {
+  /**
+   * Opens Razorpay Checkout (cards/netbanking/wallets or UPI) for this order. The server creates
+   * the Razorpay order and verifies the signature before the order is marked paid.
+   */
+  const startPreorderPayment = async (bookingCode: string, method: CheckoutMethod) => {
     if (payingNow) return;
     setPayingNow(true);
     try {
-      const outcome = await payForPreorder(bookingCode);
+      const outcome = await payOnline(bookingCode, method, {
+        onOrderCreated: (o) =>
+          setPreorderPay((prev) => prev && { ...prev, duePaise: o.amountPaise, totalPaise: o.order.totalAmountPaise, kind: o.kind === "deposit" ? "deposit" : prev.kind }),
+      });
       if (outcome.status === "paid") {
         setPreorderPay((prev) => prev && { ...prev, status: "paid", order: outcome.order, receipt: outcome.receipt, error: undefined });
-        toast.success("Payment received! Your order is confirmed and sent to the kitchen.");
+        toast.success(
+          preorderPay?.kind === "full"
+            ? "Payment received! Your order is placed and paid."
+            : "Payment received! Your order is confirmed and sent to the kitchen."
+        );
         sendBookingConfirmationNotifications({
           name: name.trim(),
           phone: phone.trim(),
@@ -779,7 +849,11 @@ function ReservePage() {
         setPreorderPay((prev) => prev && { ...prev, error: outcome.message });
         toast.error(outcome.message);
       } else {
-        toast.info(`Payment not completed. Your order is held for ${PAYMENT_WINDOW_MINUTES} minutes — you can retry below.`);
+        toast.info(
+          preorderPay?.kind === "full"
+            ? "Payment not completed. Your order is saved — you can retry below or from My Bookings."
+            : `Payment not completed. Your order is held for ${PAYMENT_WINDOW_MINUTES} minutes — you can retry below.`
+        );
       }
     } catch (err) {
       const expired = err instanceof PaymentApiError && err.code === "ORDER_EXPIRED";
@@ -811,51 +885,6 @@ function ReservePage() {
       toast.error("Could not update payment status.");
     } finally {
       setMarkingPaid(false);
-    }
-  };
-
-  const handlePayWithRazorpay = async () => {
-    if (!code) return;
-    setPayingOnline(true);
-    try {
-      await openRazorpayCheckout({
-        amount: totalWithDeposit,
-        bookingCode: code,
-        customerName: name,
-        customerEmail: email || undefined,
-        customerPhone: phone,
-        description: `CafeQ Dining & Reservation — ${code}`,
-        onSuccess: async (payment) => {
-          toast.info("Verifying Razorpay payment signature…");
-          const verification = await verifyAndCompleteRazorpayPayment({
-            code,
-            orderId: payment.razorpay_order_id,
-            paymentId: payment.razorpay_payment_id,
-            signature: payment.razorpay_signature,
-          });
-
-          if (verification.success) {
-            setQrPaymentStatus("paid");
-            if (verification.receipt) {
-              setReceiptData(verification.receipt);
-            }
-            toast.success("Payment verified! Digital receipt generated & sent.");
-          } else {
-            toast.error(verification.error || "Payment verification failed.");
-          }
-          setPayingOnline(false);
-        },
-        onError: (err) => {
-          toast.error(`Payment failed: ${err.description}`);
-          setPayingOnline(false);
-        },
-        onDismiss: () => {
-          setPayingOnline(false);
-        },
-      });
-    } catch (err) {
-      toast.error("Could not launch Razorpay checkout.");
-      setPayingOnline(false);
     }
   };
 
@@ -1002,7 +1031,9 @@ function ReservePage() {
           <div className="mt-8 rounded-2xl border border-border bg-card p-6 text-left shadow-warm space-y-4" aria-live="polite">
             <div className="flex items-center justify-between gap-2">
               <div>
-                <p className="eyebrow text-accent">Pre-order {prepayFull ? "Prepayment" : "Deposit"}</p>
+                <p className="eyebrow text-accent">
+                  {preorderPay.kind === "full" ? "Online Payment" : `Pre-order ${prepayFull ? "Prepayment" : "Deposit"}`}
+                </p>
                 <h3 className="text-lg font-semibold text-foreground mt-0.5">
                   {preorderPay.status === "paid"
                     ? `Paid ${formatPaise(preorderPay.receipt?.amountPaise ?? preorderPay.duePaise)}`
@@ -1046,9 +1077,15 @@ function ReservePage() {
             {preorderPay.status === "awaiting" && (
               <>
                 <p className="text-xs text-muted-foreground leading-relaxed">
-                  Your order is held — the kitchen only starts once payment is confirmed. Complete payment by{" "}
-                  <strong className="text-foreground">{formatIst(preorderPay.expiresAt, false)} IST</strong>, otherwise it
-                  expires automatically.
+                  {preorderPay.expiresAt ? (
+                    <>
+                      Your order is held — the kitchen only starts once payment is confirmed. Complete payment by{" "}
+                      <strong className="text-foreground">{formatIst(preorderPay.expiresAt, false)} IST</strong>, otherwise it
+                      expires automatically.
+                    </>
+                  ) : (
+                    <>Your order is saved. Complete the online payment to finish — you can also pay later from My Bookings.</>
+                  )}
                 </p>
                 {preorderPay.error && (
                   <p role="alert" className="text-xs text-destructive flex items-start gap-1.5">
@@ -1056,13 +1093,15 @@ function ReservePage() {
                   </p>
                 )}
                 <Button
-                  onClick={() => code && startPreorderPayment(code)}
+                  onClick={() => code && startPreorderPayment(code, preorderPay.method)}
                   disabled={payingNow}
                   className="w-full bg-accent hover:bg-accent/90 text-accent-foreground font-semibold"
                   size="lg"
                 >
                   <CreditCard className="size-4 mr-2" />
-                  {payingNow ? "Processing payment…" : `Pay ${formatPaise(preorderPay.duePaise)} with Razorpay`}
+                  {payingNow
+                    ? "Processing payment…"
+                    : `${preorderPay.error ? "Retry: pay" : "Pay"} ${formatPaise(preorderPay.duePaise)} with ${preorderPay.method === "upi" ? "UPI" : "Razorpay"}`}
                 </Button>
               </>
             )}
@@ -1107,65 +1146,6 @@ function ReservePage() {
                     prepayFull
                   )}
                 </p>
-              </div>
-            )}
-          </div>
-        ) : paymentMethod === "online_razorpay" ? (
-          <div className="mt-8 rounded-2xl border border-border bg-card p-6 text-left shadow-warm">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="eyebrow text-accent">Payment Gateway: Razorpay</p>
-                <h3 className="text-lg font-semibold text-foreground mt-0.5">Total Amount: ₹{totalWithDeposit}</h3>
-              </div>
-              <Badge
-                variant={qrPaymentStatus === "paid" ? "default" : "secondary"}
-                className={qrPaymentStatus === "paid" ? "bg-emerald-600 text-white" : "bg-amber-500/10 text-amber-700"}
-              >
-                {qrPaymentStatus === "paid" ? "✅ Payment Verified" : "⏳ Pending Razorpay Payment"}
-              </Badge>
-            </div>
-
-            {qrPaymentStatus === "pending" ? (
-              <div className="mt-5 space-y-4">
-                <p className="text-xs text-muted-foreground leading-relaxed">
-                  Pay securely via <strong>Razorpay (UPI, Credit/Debit Cards, Netbanking, Wallets)</strong>. 
-                  Test mode enabled. Once settled, your digital tax receipt will be generated automatically and attached to your confirmation email.
-                </p>
-
-                <div className="pt-2">
-                  <Button
-                    onClick={handlePayWithRazorpay}
-                    disabled={payingOnline}
-                    className="w-full bg-accent hover:bg-accent/90 text-accent-foreground font-semibold py-3 shadow-md"
-                    size="lg"
-                  >
-                    <CreditCard className="size-4 mr-2" />
-                    {payingOnline ? "Opening Razorpay Checkout…" : `Pay ₹${totalWithDeposit} with Razorpay`}
-                  </Button>
-                </div>
-              </div>
-            ) : (
-              <div className="mt-5 rounded-xl bg-emerald-500/10 border border-emerald-500/20 p-5 text-center space-y-3">
-                <div>
-                  <p className="font-semibold text-emerald-800 dark:text-emerald-300 text-base">
-                    Online Payment Verified & Completed!
-                  </p>
-                  <p className="text-xs text-muted-foreground mt-1">
-                    Your payment of ₹{totalWithDeposit} has been processed via Razorpay. Booking ref: {code}.
-                  </p>
-                </div>
-
-                {receiptData && (
-                  <div className="pt-2 flex justify-center">
-                    <Button
-                      onClick={() => downloadReceiptPdf(receiptData)}
-                      className="bg-emerald-700 hover:bg-emerald-800 text-white text-xs shadow-sm"
-                      size="sm"
-                    >
-                      <Download className="size-3.5 mr-1.5" /> Download Tax Receipt (PDF)
-                    </Button>
-                  </div>
-                )}
               </div>
             )}
           </div>
@@ -2440,8 +2420,8 @@ function ReservePage() {
               </div>
             )}
 
-            {/* Pre-order: online deposit / prepayment replaces the payment choice */}
-            {prepayActive ? (
+            {/* Pre-order deposit / prepayment: breakdown + policy (paid with the method chosen below) */}
+            {prepayActive && (
               <div className="mt-5 space-y-3 border-t border-border/70 pt-4 text-xs">
                 <p className="font-semibold text-foreground flex items-center gap-1.5">
                   <CreditCard className="size-3.5 text-accent" />
@@ -2478,82 +2458,58 @@ function ReservePage() {
                     I agree to the cancellation &amp; refund policy above.
                   </span>
                 </label>
-                <p className="text-[10px] text-muted-foreground">
-                  Secure payment via Razorpay — UPI, cards, netbanking & wallets. The final amount is confirmed by the cafe's server.
-                </p>
               </div>
-            ) : (
-            <div className="mt-5 space-y-2.5 border-t border-border/70 pt-4">
-              <p className="text-xs font-semibold text-foreground">Payment Method</p>
-
-              <label className={`flex cursor-pointer items-start gap-2.5 rounded-xl border p-2.5 transition-colors text-xs ${
-                paymentMethod === "online_razorpay" ? "border-accent bg-accent/10" : "border-border hover:bg-secondary/40"
-              }`}>
-                <input
-                  type="radio"
-                  name="payment"
-                  className="mt-0.5"
-                  checked={paymentMethod === "online_razorpay"}
-                  onChange={() => setPaymentMethod("online_razorpay")}
-                />
-                <div className="flex-1">
-                  <div className="flex items-center justify-between">
-                    <p className="font-semibold text-foreground flex items-center gap-1">
-                      <CreditCard className="size-3.5 text-accent" /> Razorpay Online (UPI, Cards, Wallets)
-                    </p>
-                    <Badge variant="secondary" className="text-[10px] bg-emerald-500/10 text-emerald-600">Test Mode</Badge>
-                  </div>
-                  <p className="text-[11px] text-muted-foreground mt-0.5">
-                    Cards, UPI, Netbanking & Wallets with instant digital PDF receipt.
-                  </p>
-                </div>
-              </label>
-
-              <label className={`flex cursor-pointer items-start gap-2.5 rounded-xl border p-2.5 transition-colors text-xs ${
-                paymentMethod === "upi_prepay" ? "border-accent bg-accent/10" : "border-border hover:bg-secondary/40"
-              }`}>
-                <input
-                  type="radio"
-                  name="payment"
-                  className="mt-0.5"
-                  checked={paymentMethod === "upi_prepay"}
-                  onChange={() => setPaymentMethod("upi_prepay")}
-                />
-                <div className="flex-1">
-                  <div className="flex items-center justify-between">
-                    <p className="font-semibold text-foreground flex items-center gap-1">
-                      <QrCode className="size-3.5 text-accent" /> QR Code Payment (UPI)
-                    </p>
-                    <Badge variant="secondary" className="text-[10px]">Instant</Badge>
-                  </div>
-                  <p className="text-[11px] text-muted-foreground mt-0.5">
-                    Scan with UPI app on confirmation & mark as paid.
-                  </p>
-                </div>
-              </label>
-
-              <label className={`flex cursor-pointer items-start gap-2.5 rounded-xl border p-2.5 transition-colors text-xs ${
-                paymentMethod === "pay_on_arrival" ? "border-accent bg-accent/10" : "border-border hover:bg-secondary/40"
-              }`}>
-                <input
-                  type="radio"
-                  name="payment"
-                  className="mt-0.5"
-                  checked={paymentMethod === "pay_on_arrival"}
-                  onChange={() => setPaymentMethod("pay_on_arrival")}
-                />
-                <div className="flex-1">
-                  <p className="font-semibold text-foreground flex items-center gap-1">
-                    <Banknote className="size-3.5 text-muted-foreground" />
-                    {orderType === "DELIVERY" ? "Cash on Delivery" : "Pay at Counter (Cash)"}
-                  </p>
-                  <p className="text-[11px] text-muted-foreground mt-0.5">
-                    {orderType === "DELIVERY" ? "Pay rider upon delivery arrival." : "Order confirmed for counter payment."}
-                  </p>
-                </div>
-              </label>
-            </div>
             )}
+
+            {/* Payment method — options come from getAllowedPaymentMethods(hasFoodPreOrder) */}
+            <div className="mt-5 space-y-2.5 border-t border-border/70 pt-4">
+              <p id="payment-method-label" className="text-xs font-semibold text-foreground">Payment Method</p>
+              {hasFoodPreOrder && (
+                <p className="text-[11px] text-muted-foreground">
+                  Food pre-orders are paid online — cash isn't available.
+                </p>
+              )}
+              <div role="radiogroup" aria-labelledby="payment-method-label" className="grid gap-2">
+                {allowedPaymentMethods.map((id) => {
+                  const m = PAYMENT_METHODS[id];
+                  const selected = paymentMethod === id;
+                  const Icon = id === "online_razorpay" ? CreditCard : id === "upi_razorpay" ? Smartphone : id === "upi_prepay" ? QrCode : Banknote;
+                  const label = m.cash && orderType === "DELIVERY" ? "Cash on Delivery" : m.label;
+                  const description = m.cash && orderType === "DELIVERY" ? "Pay the rider when your order arrives" : m.description;
+                  return (
+                    <label
+                      key={id}
+                      className={`flex cursor-pointer items-start gap-2.5 rounded-xl border p-2.5 transition-colors text-xs ${
+                        selected ? "border-accent bg-accent/10 ring-1 ring-accent" : "border-border hover:bg-secondary/40"
+                      }`}
+                    >
+                      <input
+                        type="radio"
+                        name="payment"
+                        value={id}
+                        className="mt-0.5"
+                        checked={selected}
+                        onChange={() => setPaymentMethod(id)}
+                      />
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center justify-between gap-2">
+                          <p className="font-semibold text-foreground flex items-center gap-1">
+                            <Icon className={`size-3.5 ${m.cash ? "text-muted-foreground" : "text-accent"}`} /> {label}
+                          </p>
+                          {m.online && (
+                            <Badge variant="secondary" className="text-[10px] bg-emerald-500/10 text-emerald-600 shrink-0">
+                              Secure
+                            </Badge>
+                          )}
+                        </div>
+                        <p className="text-[11px] text-muted-foreground mt-0.5">{description}</p>
+                      </div>
+                      {selected && <CheckCircle2 className="size-4 text-accent shrink-0" aria-hidden="true" />}
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
 
             <div className="mt-4 pt-3 border-t border-border/70 flex justify-between items-baseline">
               <span className="font-semibold text-sm">{prepayActive ? "Due Now" : "Total Due"}</span>
@@ -2587,6 +2543,8 @@ function ReservePage() {
                 ? "Remove Out of Stock Items to Confirm"
                 : prepayActive
                 ? `Pay ${formatPaise(estDuePaise)} & Place Order`
+                : isOnlinePaymentMethod(paymentMethod)
+                ? `Pay ₹${totalWithDeposit} with ${PAYMENT_METHODS[paymentMethod].label} & Place Order`
                 : orderType === "DINE_IN"
                 ? "Confirm Table & Place Order"
                 : orderType === "TAKEAWAY"

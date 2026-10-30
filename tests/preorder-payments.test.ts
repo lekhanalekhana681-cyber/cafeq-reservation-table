@@ -52,6 +52,7 @@ const MIGRATIONS = [
   "20261030000000_preorder_payments.sql",
   "20261031000000_order_status_flow.sql",
   "20261101000000_billed_status.sql",
+  "20261102000000_online_payment_methods.sql",
 ];
 
 /** Fake Razorpay gateway: same shape as createRazorpayClient, real HMAC signatures. */
@@ -510,6 +511,61 @@ async function runTests() {
     "A cancelled order can never be completed — not even by the server role"
   );
   await expectError(() => insertBill(cx, `CQ-BILL-${cx}-A`), "BILL_NOT_ALLOWED:cancelled", "A cancelled order can never be billed");
+
+  // --------------------------------------------------------------------------
+  // SUITE 7c: Payment methods & full online payment (Razorpay / UPI)
+  // --------------------------------------------------------------------------
+  console.log("\nSuite 7c: Pre-order Payment Methods & Full Online Payment");
+
+  await expectError(
+    () => placeOrder({ ...istSlot(-5), payment_method: "pay_on_arrival" }),
+    "Cash payment is not available for food pre-orders",
+    "Food pre-order with cash is rejected by the database (check_violation → HTTP 400)"
+  );
+  await expectError(
+    () => placeOrder({ ...istSlot(-5), payment_method: "upi_prepay" }),
+    "must be paid online",
+    "Food pre-order with the unverified UPI QR option is rejected"
+  );
+  const tableOnlyCash = await placeOrder({ ...istSlot(60), items: "[]", payment_method: "pay_on_arrival" });
+  b = await getBooking(tableOnlyCash);
+  assert(b.payment_method === "pay_on_arrival", "Table-only booking can still choose cash");
+  const defaulted = await placeOrder({ ...istSlot(-5) });
+  b = await getBooking(defaulted);
+  assert(b.payment_method === "online_razorpay", "Food pre-order without a method defaults to Razorpay");
+  await expectError(
+    () => asAnon("UPDATE public.bookings SET payment_method = 'pay_on_arrival' WHERE code = $1", [defaulted]),
+    "Cash payment is not available",
+    "Switching a pre-order to cash afterwards is rejected"
+  );
+
+  // Walk-in dine-in with food (no deposit rule) paying the fullOrder order online with UPI
+  const fullOrder = await placeOrder({ ...istSlot(-5), payment_method: "upi_razorpay" });
+  await expectError(
+    () => service.createOrder({ code: fullOrder, method: "cash" }),
+    "CASH_NOT_ALLOWED_FOR_PREORDER",
+    "create-order with a cash method → 400"
+  );
+  const fullCo = await service.createOrder({ code: fullOrder, method: "upi" });
+  assert(fullCo.amountPaise === 48000 && fullCo.kind === "full" && fullCo.method === "upi", `Full payment priced by the server from the menu: ${fullCo.amountPaise} paise (client sent ₹1)`);
+  const receipt = rzp.orders.get(fullCo.razorpayOrderId)?.receipt as string;
+  assert(typeof receipt === "string" && receipt.startsWith(`${fullOrder}-`) && receipt.length <= 40, `Razorpay order has a unique receipt (${receipt})`);
+  const fullPaid = await service.verify({ code: fullOrder, ...rzp.pay(fullCo.razorpayOrderId) });
+  b = await getBooking(fullOrder);
+  assert(
+    b.payment_state === "PAID" && b.payment_status === "paid" && b.amount_paid_paise === 48000 && fullPaid.receipt.amountPaise === 48000,
+    "Verified signature → order marked PAID with a receipt"
+  );
+  assert(b.status === "pending", "Payment doesn't skip the admin's Confirm step");
+  await expectError(() => service.createOrder({ code: fullOrder, method: "razorpay" }), "ORDER_ALREADY_PAID", "Paying the same order twice is refused");
+
+  // Table booking only, paying the ₹100 table-hold deposit online
+  const tableOnline = await placeOrder({ ...istSlot(60), items: "[]", payment_method: "online_razorpay", deposit_required: true, deposit_amount: 100 });
+  const tableCo = await service.createOrder({ code: tableOnline, method: "razorpay" });
+  assert(tableCo.amountPaise === 10000, "Table-only online payment = table-hold deposit (₹100)");
+  const noDeposit = await placeOrder({ ...istSlot(60), items: "[]", payment_method: "online_razorpay" });
+  await expectError(() => service.createOrder({ code: noDeposit }), "NOTHING_TO_PAY", "Nothing to pay online → clear error");
+  await expectError(() => service.createOrder({ code: tableOnlyCash }), "NOT_AN_ONLINE_ORDER", "Cash order can't open online checkout");
 
   // --------------------------------------------------------------------------
   // SUITE 8: HTTP adapters (PostgREST RPC + Razorpay REST) with a mocked fetch

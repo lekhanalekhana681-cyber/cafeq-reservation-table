@@ -33,12 +33,22 @@ import {
 } from "@/lib/order-items";
 import { subscribeToKitchenEvents } from "@/lib/kitchen.sync";
 import { getCafeSettings } from "@/lib/settings.functions";
+import { isOnlinePaymentMethod } from "@/lib/payment-methods";
+
+/** Pre-order awaiting its deposit, or any order that chose online payment and hasn't paid yet. */
+const needsOnlinePayment = (b: BookingInput) =>
+  b.status === "pending_payment" ||
+  (!b.paymentRequired &&
+    isOnlinePaymentMethod(b.paymentMethod) &&
+    (b.paymentState === "UNPAID" || b.paymentState === "PENDING") &&
+    b.paymentStatus !== "paid" &&
+    !["cancelled", "no_show", "expired", "billed"].includes(b.status));
 import {
   cancelPreorder,
   DEFAULT_PREORDER_SETTINGS,
   formatIst,
   formatPaise,
-  payForPreorder,
+  payOnline,
   PAYMENT_STATE_BADGE_CLASS,
   PAYMENT_STATE_LABELS,
   refundCutoffMs,
@@ -160,7 +170,7 @@ function HistoryPage() {
           bookingCode: b.code,
           orderId: `order_${b.code}`,
           paymentId: b.paymentReference || "Prepaid",
-          paymentMethod: b.paymentMethod === "online_razorpay" ? "Razorpay Online" : b.paymentMethod === "upi_prepay" ? "UPI QR Code" : "Cash on Arrival",
+          paymentMethod: b.paymentMethod === "online_razorpay" ? "Razorpay Online" : b.paymentMethod === "upi_razorpay" ? "UPI (Razorpay)" : b.paymentMethod === "upi_prepay" ? "UPI QR Code" : "Cash on Arrival",
           paymentStatus: (b.paymentStatus as any) === "paid" ? "paid" : "pending",
           date: b.date,
           time: b.time,
@@ -247,7 +257,7 @@ function HistoryPage() {
     if (payingCode) return;
     setPayingCode(b.code);
     try {
-      const outcome = await payForPreorder(b.code);
+      const outcome = await payOnline(b.code, b.paymentMethod === "upi_razorpay" ? "upi" : "razorpay");
       if (outcome.status === "paid") {
         toast.success(`Payment received. Order ${b.code} is confirmed and sent to the kitchen.`);
       } else if (outcome.status === "failed") {
@@ -665,7 +675,7 @@ function HistoryPage() {
                   {/* Actions */}
                   <div className="flex flex-wrap items-center gap-2.5 shrink-0">
                     {/* Retry payment for an unpaid pre-order */}
-                    {b.status === "pending_payment" && (
+                    {needsOnlinePayment(b) && (
                       <Button
                         size="sm"
                         onClick={() => handlePayNow(b)}
@@ -673,7 +683,9 @@ function HistoryPage() {
                         className="text-xs"
                       >
                         <CreditCard className="size-3.5 mr-1.5" />
-                        {payingCode === b.code ? "Opening payment…" : `Pay ${formatPaise(b.depositDuePaise)} now`}
+                        {payingCode === b.code
+                          ? "Opening payment…"
+                          : `Pay ${formatPaise(b.status === "pending_payment" ? b.depositDuePaise : (b.totalAmountPaise ?? b.total * 100))} now`}
                       </Button>
                     )}
 
