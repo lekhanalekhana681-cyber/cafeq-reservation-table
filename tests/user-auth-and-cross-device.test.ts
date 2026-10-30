@@ -55,7 +55,7 @@ async function runTests() {
   const testUserA = {
     name: "Aarav Sharma",
     email: `aarav_${uniqueId}@example.com`,
-    phone: "+91 98765 43210",
+    phone: "9876543210",
     password: "Password@123",
   };
 
@@ -135,7 +135,7 @@ async function runTests() {
   const testUserB = {
     name: "Priya Rao",
     email: `priya_${uniqueId}@example.com`,
-    phone: "+91 91234 56789",
+    phone: "9123456789",
     password: "Password@123",
   };
   const regResB = await registerUser(testUserB);

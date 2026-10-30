@@ -468,6 +468,25 @@ if (typeof window !== "undefined") {
 }
 
 // ----------------- User Registration -----------------
+/**
+ * User registration rules. The Register page uses these as HTML `pattern`s (the browser then
+ * shows "Please match the requested format."), and registerUser enforces the same rules.
+ * - Email:    something@domain.tld
+ * - Password: at least 8 characters, including at least one uppercase letter
+ * - Phone:    exactly 10 digits
+ */
+export const REGISTRATION_PATTERNS = {
+  email: "[^\\s@]+@[^\\s@]+\\.[^\\s@]+",
+  password: "(?=.*[A-Z]).{8,}",
+  phone: "[0-9]{10}",
+} as const;
+
+const matchesPattern = (pattern: string, value: string) => new RegExp(`^(?:${pattern})$`).test(value);
+
+export const isValidRegistrationEmail = (email: string) => matchesPattern(REGISTRATION_PATTERNS.email, email.trim());
+export const isValidRegistrationPassword = (password: string) => matchesPattern(REGISTRATION_PATTERNS.password, password);
+export const isValidRegistrationPhone = (phone: string) => matchesPattern(REGISTRATION_PATTERNS.phone, phone.trim());
+
 export async function registerUser({
   name,
   email,
@@ -489,18 +508,16 @@ export async function registerUser({
     return { success: false, error: "Please enter your full name (at least 2 characters)." };
   }
 
-  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  if (!cleanEmail || !emailRegex.test(cleanEmail)) {
-    return { success: false, error: "Please enter a valid email address." };
+  if (!cleanEmail || !isValidRegistrationEmail(cleanEmail)) {
+    return { success: false, error: "Please enter a valid email address (e.g. name@gmail.com)." };
   }
 
-  const digitsOnlyPhone = cleanPhone.replace(/\D/g, "");
-  if (!cleanPhone || digitsOnlyPhone.length < 7) {
-    return { success: false, error: "Please enter a valid phone number." };
+  if (!isValidRegistrationPhone(cleanPhone)) {
+    return { success: false, error: "Phone number must be exactly 10 digits (numbers only)." };
   }
 
-  if (!password || password.length < 6) {
-    return { success: false, error: "Password must be at least 6 characters long." };
+  if (!password || !isValidRegistrationPassword(password)) {
+    return { success: false, error: "Password must be at least 8 characters and include an uppercase letter." };
   }
 
   if (confirmPassword !== undefined && password !== confirmPassword) {
