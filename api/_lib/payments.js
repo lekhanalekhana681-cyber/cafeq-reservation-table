@@ -13,7 +13,7 @@ import { verifyWebhookSignature } from "./razorpay.js";
 const digits = (s) => String(s || "").replace(/\D/g, "").slice(-10);
 
 // Checkout methods the server accepts (mirrors src/lib/payment-methods.ts)
-const ONLINE_METHODS = new Set(["razorpay", "upi"]);
+const ONLINE_METHODS = new Set(["razorpay", "upi", "card", "netbanking"]);
 const CASH_METHODS = new Set(["cash", "pay_on_arrival", "cod", "pay_at_cafe"]);
 
 export function createPaymentService({ db, razorpay, webhookSecret, notify = async () => {} }) {
@@ -96,7 +96,7 @@ export function createPaymentService({ db, razorpay, webhookSecret, notify = asy
           throw new PaymentError(400, "CASH_NOT_ALLOWED_FOR_PREORDER", "Cash payment is not available for food pre-orders. Please pay online with Razorpay or UPI.");
         }
         if (!ONLINE_METHODS.has(method)) {
-          throw new PaymentError(400, "BAD_REQUEST", "Choose Razorpay or UPI.");
+          throw new PaymentError(400, "BAD_REQUEST", "Choose UPI, card or netbanking.");
         }
         const prep = await db.rpc("pay_prepare_checkout", { _code: code });
         let razorpayOrderId = prep.razorpay_order_id;

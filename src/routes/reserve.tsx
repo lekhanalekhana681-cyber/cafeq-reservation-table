@@ -1,7 +1,8 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { useMemo, useState, useEffect } from "react";
+import { useMemo, useState, useEffect, useRef } from "react";
 import { useAuth } from "@/context/AuthContext";
 import { WifiCard } from "@/components/WifiCard";
+import { UpiQrBackup } from "@/components/UpiQrBackup";
 import {
   Check,
   Minus,
@@ -29,6 +30,7 @@ import {
   Bike,
   MapPin,
   Package,
+  Landmark,
   Laptop,
   Plug,
   VolumeX,
@@ -37,7 +39,6 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { useQuery } from "@tanstack/react-query";
-import QRCode from "react-qr-code";
 
 import {
   categories as categoriesRaw,
@@ -75,6 +76,7 @@ import {
   isPreorder,
   istToday,
   payOnline,
+  claimUpiQrPayment,
   type CheckoutMethod,
   PAYMENT_WINDOW_MINUTES,
   refundCutoffMs,
@@ -96,7 +98,6 @@ import {
   type OrderItem,
 } from "@/lib/bookings.functions";
 import { sendBookingConfirmationNotifications } from "@/lib/notifications.functions";
-import { downloadReceiptPdf, getReceiptByBookingCode, type StoredReceipt } from "@/lib/receipt.service";
 import { getCafeSettings } from "@/lib/settings.functions";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -115,11 +116,13 @@ import { PageBackground } from "@/components/PageBackground";
 import { ReservationChatbot } from "@/components/ReservationChatbot";
 import {
   getAllowedPaymentMethods,
+  getPaymentOptions,
   isOnlinePaymentMethod,
   orderHasPreOrder,
-  PAYMENT_METHODS,
-  resolvePaymentMethod,
+  PAYMENT_OPTIONS,
+  resolvePaymentOption,
   type PaymentMethodId,
+  type PaymentOptionId,
 } from "@/lib/payment-methods";
 import { loadRazorpayScript } from "@/lib/razorpay.service";
 
@@ -201,6 +204,13 @@ const inr = (val: number) => Math.round(val);
 // Cafe dates are IST; toISOString() alone gives the UTC date (wrong between 00:00 and 05:30 IST)
 const today = () => istToday();
 const genCode = () => `CQ-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+
+const CHECKOUT_LABELS: Record<CheckoutMethod, string> = {
+  razorpay: "Razorpay",
+  upi: "UPI",
+  card: "card",
+  netbanking: "netbanking",
+};
 
 type CartItemState = {
   qty: number;
@@ -413,8 +423,16 @@ function ReservePage() {
 
   // Cart
   const [cart, setCart] = useState<Record<string, CartItemState>>({});
-  // Payment: online_razorpay vs upi_prepay vs pay_on_arrival
-  const [paymentMethod, setPaymentMethod] = useState<PaymentMethodId>("online_razorpay");
+  // Payment option (UPI → Cards → Netbanking, + cash for table-only); stored as a PaymentMethodId
+  const [paymentOption, setPaymentOption] = useState<PaymentOptionId>("upi");
+  const paymentMethod: PaymentMethodId = PAYMENT_OPTIONS[paymentOption].method;
+  // UPI QR backup: the reservation ID exists before the order is placed, so the QR can carry it
+  const [draftCode] = useState(genCode);
+  const [showUpiQr, setShowUpiQr] = useState(false);
+  const [qrClaim, setQrClaim] = useState<"idle" | "sending" | "submitted">("idle");
+  /** Set by "I have paid" just before submitting the form: the UTR the customer typed (may be "") */
+  const qrSubmitRef = useRef<string | null>(null);
+  const formRef = useRef<HTMLFormElement>(null);
   const [code, setCode] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
@@ -434,12 +452,6 @@ function ReservePage() {
     receipt?: PaymentReceipt;
     error?: string;
   } | null>(null);
-
-  // Post-booking QR and Online payment state
-  const [qrPaymentStatus, setQrPaymentStatus] = useState<"pending" | "paid">("pending");
-  const [txnRef, setTxnRef] = useState("");
-  const [markingPaid, setMarkingPaid] = useState(false);
-  const [receiptData, setReceiptData] = useState<StoredReceipt | null>(null);
 
   useEffect(() => {
     if (phone.trim().length >= 10) {
@@ -547,18 +559,19 @@ function ReservePage() {
     isPreorder({ orderType, date, time, pickupTime, items });
   const prepayFull = settings.preorderPaymentMode === "FULL";
 
-  // Payment methods follow the cart: food pre-order → Razorpay / UPI only; table only → all options
+  // Payment options follow the cart: food pre-order → UPI / Cards / Netbanking; table only → + cash
   const hasFoodPreOrder = orderHasPreOrder(items);
   const allowedPaymentMethods = getAllowedPaymentMethods(hasFoodPreOrder);
+  const paymentOptions = getPaymentOptions(hasFoodPreOrder);
   useEffect(() => {
-    const next = resolvePaymentMethod(paymentMethod, hasFoodPreOrder);
-    if (next !== paymentMethod) {
-      setPaymentMethod(next);
-      if (PAYMENT_METHODS[paymentMethod].cash) {
-        toast.info("Food pre-orders are paid online, so we switched your payment to Razorpay.");
+    const next = resolvePaymentOption(paymentOption, hasFoodPreOrder);
+    if (next !== paymentOption) {
+      setPaymentOption(next);
+      if (PAYMENT_OPTIONS[paymentOption].cash) {
+        toast.info("Food pre-orders are paid online, so we switched your payment to UPI.");
       }
     }
-  }, [hasFoodPreOrder, paymentMethod]);
+  }, [hasFoodPreOrder, paymentOption]);
 
   // Load Razorpay Checkout early so the Pay button opens instantly
   useEffect(() => {
@@ -664,6 +677,10 @@ function ReservePage() {
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
+    // "I have paid" on the UPI QR submits the form too: place the order as a UPI QR payment
+    const viaQr = qrSubmitRef.current !== null;
+    const qrUtr = (qrSubmitRef.current ?? "").trim();
+    qrSubmitRef.current = null;
 
     // 1. Validate required fields per Order Type (same rules createBooking enforces)
     const errors = validateOrderDetails({
@@ -698,11 +715,12 @@ function ReservePage() {
       return;
     }
 
-    if (!allowedPaymentMethods.includes(paymentMethod)) {
-      toast.error("Food pre-orders are paid online — please choose Razorpay or UPI.");
+    const method: PaymentMethodId = viaQr ? "upi_prepay" : paymentMethod;
+    if (!allowedPaymentMethods.includes(method)) {
+      toast.error("Food pre-orders are paid online — please choose UPI, a card or netbanking.");
       return;
     }
-    const payingOnlineNow = isOnlinePaymentMethod(paymentMethod);
+    const payingOnlineNow = isOnlinePaymentMethod(method);
     if (payingOnlineNow && !getPublicClient()) {
       // Online payments need the database + /api functions (deployed site or `vercel dev`)
       toast.error("Online payment isn't available on this server yet. Please contact the cafe.");
@@ -712,13 +730,9 @@ function ReservePage() {
 
     if (submitting) return;
     setSubmitting(true);
-    const bookingCode = genCode();
-    const initialPaymentStatus = payingOnlineNow
-      ? "pending_online"
-      : paymentMethod === "upi_prepay"
-      ? "pending_qr"
-      : "pending_cash";
-    const checkoutMethod: CheckoutMethod = PAYMENT_METHODS[paymentMethod].checkoutMethod ?? "razorpay";
+    const bookingCode = draftCode;
+    const initialPaymentStatus = viaQr ? "pending_verification" : payingOnlineNow ? "pending_online" : "pending_cash";
+    const checkoutMethod: CheckoutMethod = PAYMENT_OPTIONS[paymentOption].checkoutMethod ?? "razorpay";
 
     try {
       const created = await createBooking({
@@ -756,17 +770,40 @@ function ReservePage() {
           windowPriority,
           items,
           total: totalWithDeposit,
-          paymentMethod,
+          paymentMethod: method,
           paymentStatus: initialPaymentStatus,
+          paymentReference: viaQr && qrUtr ? qrUtr : undefined,
           userId: user?.id || null,
           status: "pending",
           kitchenStatus: "new" as const,
         },
       });
 
-      // Pre-order parked by the database until paid: open Razorpay right away
+      // Pre-order parked by the database until paid
       if ("requiresPayment" in created && created.requiresPayment) {
         setCode(bookingCode);
+        if (viaQr) {
+          // Paid by UPI QR: the server marks it "Pending verification" and releases the hold
+          setSubmitting(false);
+          try {
+            await claimUpiQrPayment(bookingCode, phone.trim(), qrUtr);
+            setQrClaim("submitted");
+            toast.success("Order placed — your UPI payment is pending verification by our staff.");
+          } catch (err) {
+            setPreorderPay({
+              status: "awaiting",
+              kind: "deposit",
+              method: checkoutMethod,
+              duePaise: created.payment.depositDuePaise ?? 0,
+              totalPaise: created.payment.totalAmountPaise,
+              expiresAt: created.payment.paymentExpiresAt,
+              scheduledAt: created.payment.scheduledAt,
+              error: err instanceof Error ? err.message : "We couldn't record your UPI payment. Please try again.",
+            });
+            setShowUpiQr(true);
+          }
+          return;
+        }
         setPreorderPay({
           status: "awaiting",
           kind: "deposit",
@@ -815,7 +852,11 @@ function ReservePage() {
       }
 
       setCode(bookingCode);
-      setQrPaymentStatus("pending");
+      if (viaQr) {
+        setQrClaim("submitted");
+        toast.success("Order placed — your UPI payment is pending verification by our staff.");
+        return;
+      }
       const successMsg =
         orderType === "DINE_IN"
           ? "Table reserved & order placed!"
@@ -880,39 +921,33 @@ function ReservePage() {
     }
   };
 
-  const handleMarkAsPaid = async () => {
-    if (!code) return;
-    setMarkingPaid(true);
+  /** "I have paid" on the confirmation page (after the gateway failed): staff verify it. */
+  const handleQrClaim = async (utr: string) => {
+    if (!code || qrClaim === "sending") return;
+    setQrClaim("sending");
     try {
-      await updateBookingPaymentStatus({
-        code,
-        status: "paid",
-        reference: txnRef.trim() || `UPI-TXN-${Date.now().toString().slice(-6)}`,
-      });
-      setQrPaymentStatus("paid");
-
-      // Generate receipt
-      const fetchedReceipt = await getReceiptByBookingCode(code);
-      if (fetchedReceipt) setReceiptData(fetchedReceipt);
-
-      toast.success("Payment marked as verified!");
+      try {
+        await claimUpiQrPayment(code, phone.trim(), utr);
+      } catch (err) {
+        // Without the /api server (plain `npm run dev`) orders that aren't held for a deposit can be
+        // flagged directly; a held pre-order needs the server.
+        const noServer = err instanceof PaymentApiError && (err.code === "NO_SERVER" || err.code === "NETWORK");
+        if (!noServer || preorderPay?.kind === "deposit") throw err;
+        await updateBookingPaymentStatus({
+          code,
+          status: "pending_verification",
+          method: "upi_prepay",
+          reference: utr.trim() || undefined,
+        });
+      }
+      setPreorderPay(null);
+      setQrClaim("submitted");
+      toast.success("Thanks! Your UPI payment is pending verification by our staff.");
     } catch (err) {
-      toast.error("Could not update payment status.");
-    } finally {
-      setMarkingPaid(false);
+      setQrClaim("idle");
+      toast.error(err instanceof Error ? err.message : "We couldn't record your UPI payment. Please try again.");
     }
   };
-
-  const upiUrl = useMemo(() => {
-    const params = new URLSearchParams({
-      pa: settings?.upiId || "cafeq@upi",
-      pn: settings?.upiPayeeName || "The CAFEQ",
-      am: totalWithDeposit.toString(),
-      cu: "INR",
-      tn: `Cafeq-Order-${code || "pending"}`,
-    });
-    return `upi://pay?${params.toString()}`;
-  }, [settings, totalWithDeposit, code]);
 
   if (code) {
     const typeDetails = getOrderTypeDetails(orderType);
@@ -1041,7 +1076,7 @@ function ReservePage() {
             <p className="mt-1 font-display text-3xl tracking-widest text-foreground font-bold">{code}</p>
           </div>
 
-        {/* Payment Confirmation Component: Razorpay vs QR Code vs Cash on Arrival */}
+        {/* Payment Confirmation Component: online (Razorpay) vs UPI QR (pending verification) vs Cash on Arrival */}
         {preorderPay ? (
           <div className="mt-8 rounded-2xl border border-border bg-card p-6 text-left shadow-warm space-y-4" aria-live="polite">
             <div className="flex items-center justify-between gap-2">
@@ -1116,8 +1151,28 @@ function ReservePage() {
                   <CreditCard className="size-4 mr-2" />
                   {payingNow
                     ? "Processing payment…"
-                    : `${preorderPay.error ? "Retry: pay" : "Pay"} ${formatPaise(preorderPay.duePaise)} with ${preorderPay.method === "upi" ? "UPI" : "Razorpay"}`}
+                    : `${preorderPay.error ? "Retry: pay" : "Pay"} ${formatPaise(preorderPay.duePaise)} with ${CHECKOUT_LABELS[preorderPay.method]}`}
                 </Button>
+
+                {/* Backup when the gateway fails: pay the order total by scanning a UPI QR */}
+                {!(showUpiQr || preorderPay.error) ? (
+                  <button
+                    type="button"
+                    onClick={() => setShowUpiQr(true)}
+                    className="block mx-auto text-xs font-medium text-accent hover:underline underline-offset-2"
+                  >
+                    Having trouble? Scan QR
+                  </button>
+                ) : (
+                  code && (
+                    <UpiQrBackup
+                      amount={Math.round(preorderPay.order?.totalAmountPaise ?? preorderPay.totalPaise) / 100}
+                      reference={code}
+                      busy={qrClaim === "sending"}
+                      onPaid={handleQrClaim}
+                    />
+                  )
+                )}
               </>
             )}
 
@@ -1164,78 +1219,21 @@ function ReservePage() {
               </div>
             )}
           </div>
-        ) : paymentMethod === "upi_prepay" ? (
-          <div className="mt-8 rounded-2xl border border-border bg-card p-6 text-left shadow-warm">
-            <div className="flex items-center justify-between">
+        ) : qrClaim === "submitted" ? (
+          <div className="mt-8 rounded-2xl border border-border bg-card p-6 text-left shadow-warm space-y-3" aria-live="polite">
+            <div className="flex items-center justify-between gap-2">
               <div>
-                <p className="eyebrow">Payment Option: UPI QR Code</p>
-                <h3 className="text-lg font-semibold text-foreground mt-0.5">Scan to Pay ₹{totalWithDeposit}</h3>
+                <p className="eyebrow">Payment Option: UPI QR</p>
+                <h3 className="text-lg font-semibold text-foreground mt-0.5">Paid by UPI QR</h3>
               </div>
-              <Badge
-                variant={qrPaymentStatus === "paid" ? "default" : "secondary"}
-                className={qrPaymentStatus === "paid" ? "bg-emerald-600 text-white" : "bg-amber-500/10 text-amber-700"}
-              >
-                {qrPaymentStatus === "paid" ? "✅ Payment Verified" : "⏳ Pending Payment"}
+              <Badge variant="secondary" className="bg-amber-500/10 text-amber-700 text-xs shrink-0">
+                ⏳ Pending verification
               </Badge>
             </div>
-
-            {qrPaymentStatus === "pending" ? (
-              <div className="mt-5 space-y-4">
-                <p className="text-xs text-muted-foreground">
-                  Scan this dynamic QR code using Google Pay, PhonePe, Paytm, or any UPI app to complete your order payment.
-                </p>
-                <div className="flex flex-col items-center gap-4 py-2">
-                  <div className="rounded-xl bg-white p-4 shadow-md flex items-center justify-center border border-border/80">
-                    <QRCode value={upiUrl} size={180} />
-                  </div>
-                  <div className="text-center text-xs">
-                    <p className="font-semibold text-foreground">{settings.upiPayeeName}</p>
-                    <p className="text-muted-foreground">{settings.upiId}</p>
-                    <p className="mt-1 font-mono text-muted-foreground">Ref: Cafeq-Order-{code}</p>
-                  </div>
-                </div>
-
-                <div className="pt-4 border-t border-border/60 space-y-3">
-                  <Label htmlFor="txn" className="text-xs">UPI Transaction ID / UTR (Optional)</Label>
-                  <Input
-                    id="txn"
-                    placeholder="e.g. 403829104829"
-                    value={txnRef}
-                    onChange={(e) => setTxnRef(e.target.value)}
-                    className="text-xs h-8"
-                  />
-                  <Button
-                    onClick={handleMarkAsPaid}
-                    disabled={markingPaid}
-                    className="w-full bg-emerald-700 hover:bg-emerald-800 text-white font-medium"
-                    size="sm"
-                  >
-                    <CheckCircle2 className="size-4 mr-2" />
-                    {markingPaid ? "Verifying…" : "I have completed payment — Mark as Paid"}
-                  </Button>
-                </div>
-              </div>
-            ) : (
-              <div className="mt-5 rounded-xl bg-emerald-500/10 border border-emerald-500/20 p-4 text-center space-y-1">
-                <p className="font-semibold text-emerald-800 dark:text-emerald-300 text-sm">
-                  Payment Confirmed & Settled!
-                </p>
-                <p className="text-xs text-muted-foreground">
-                  Your payment receipt of ₹{totalWithDeposit} has been logged under code {code}.
-                </p>
-                {receiptData && (
-                  <div className="pt-2 flex justify-center">
-                    <Button
-                      onClick={() => downloadReceiptPdf(receiptData)}
-                      className="bg-emerald-700 hover:bg-emerald-800 text-white text-xs shadow-sm"
-                      size="sm"
-                    >
-                      <Download className="size-3.5 mr-1.5" /> Download Tax Receipt (PDF)
-                    </Button>
-                  </div>
-                )}
-              </div>
-            )}
+            <p className="text-xs text-muted-foreground leading-relaxed">
+              Thanks! Our staff will check the payment in our UPI account and confirm your order shortly — you'll see the
+              status in My Bookings. There's no need to pay again.
+            </p>
           </div>
         ) : (
           <div className="mt-8 rounded-2xl border border-border bg-card p-6 text-left shadow-warm space-y-2">
@@ -1299,7 +1297,7 @@ function ReservePage() {
   return (
     <>
       <PageBackground imageUrl="https://images.unsplash.com/photo-1559525839-b184a4d698c7?q=80&w=2000&auto=format&fit=crop" />
-      <form onSubmit={submit} className="mx-auto max-w-6xl px-4 sm:px-8 py-10 sm:py-16 relative z-10 bg-background/80 backdrop-blur-md my-8 sm:my-12 rounded-3xl border border-border/50">
+      <form ref={formRef} onSubmit={submit} className="mx-auto max-w-6xl px-4 sm:px-8 py-10 sm:py-16 relative z-10 bg-background/80 backdrop-blur-md my-8 sm:my-12 rounded-3xl border border-border/50">
         <div className="flex flex-col sm:flex-row sm:items-baseline sm:justify-between gap-2 border-b border-border/70 pb-6">
         <div>
           <p className="eyebrow">Table & Food Booking</p>
@@ -2518,7 +2516,7 @@ function ReservePage() {
               </div>
             )}
 
-            {/* Payment method — options come from getAllowedPaymentMethods(hasFoodPreOrder) */}
+            {/* Payment options — UPI (recommended) → Cards → Netbanking; cash only for table bookings without food */}
             <div className="mt-5 space-y-2.5 border-t border-border/70 pt-4">
               <p id="payment-method-label" className="text-xs font-semibold text-foreground">Payment Method</p>
               {hasFoodPreOrder && (
@@ -2527,42 +2525,83 @@ function ReservePage() {
                 </p>
               )}
               <div role="radiogroup" aria-labelledby="payment-method-label" className="grid gap-2">
-                {allowedPaymentMethods.map((id) => {
-                  const m = PAYMENT_METHODS[id];
-                  const selected = paymentMethod === id;
-                  const Icon = id === "online_razorpay" ? CreditCard : id === "upi_razorpay" ? Smartphone : id === "upi_prepay" ? QrCode : Banknote;
-                  const label = m.cash && orderType === "DELIVERY" ? "Cash on Delivery" : m.label;
-                  const description = m.cash && orderType === "DELIVERY" ? "Pay the rider when your order arrives" : m.description;
+                {paymentOptions.map((id) => {
+                  const o = PAYMENT_OPTIONS[id];
+                  const selected = paymentOption === id;
+                  const Icon = id === "upi" ? Smartphone : id === "card" ? CreditCard : id === "netbanking" ? Landmark : Banknote;
+                  const label = o.cash && orderType === "DELIVERY" ? "Cash on Delivery" : o.label;
+                  const description = o.cash && orderType === "DELIVERY" ? "Pay the rider when your order arrives" : o.description;
                   return (
-                    <label
-                      key={id}
-                      className={`flex cursor-pointer items-start gap-2.5 rounded-xl border p-2.5 transition-colors text-xs ${
-                        selected ? "border-accent bg-accent/10 ring-1 ring-accent" : "border-border hover:bg-secondary/40"
-                      }`}
-                    >
-                      <input
-                        type="radio"
-                        name="payment"
-                        value={id}
-                        className="mt-0.5"
-                        checked={selected}
-                        onChange={() => setPaymentMethod(id)}
-                      />
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center justify-between gap-2">
-                          <p className="font-semibold text-foreground flex items-center gap-1">
-                            <Icon className={`size-3.5 ${m.cash ? "text-muted-foreground" : "text-accent"}`} /> {label}
-                          </p>
-                          {m.online && (
-                            <Badge variant="secondary" className="text-[10px] bg-emerald-500/10 text-emerald-600 shrink-0">
-                              Secure
-                            </Badge>
+                    <div key={id}>
+                      <label
+                        className={`flex cursor-pointer items-center gap-3 rounded-xl border p-3 transition-colors focus-within:ring-2 focus-within:ring-accent/60 ${
+                          selected
+                            ? "border-accent bg-accent/10 ring-1 ring-accent"
+                            : "border-border bg-card hover:border-accent/50 hover:bg-secondary/40"
+                        }`}
+                      >
+                        <input
+                          type="radio"
+                          name="payment"
+                          value={id}
+                          className="sr-only"
+                          checked={selected}
+                          onChange={() => setPaymentOption(id)}
+                        />
+                        <span
+                          aria-hidden="true"
+                          className={`flex size-4 shrink-0 items-center justify-center rounded-full border-2 ${
+                            selected ? "border-accent" : "border-muted-foreground/40"
+                          }`}
+                        >
+                          {selected && <span className="size-2 rounded-full bg-accent" />}
+                        </span>
+                        <span
+                          className={`flex size-8 shrink-0 items-center justify-center rounded-lg ${
+                            o.cash ? "bg-muted text-muted-foreground" : "bg-accent/15 text-accent"
+                          }`}
+                        >
+                          <Icon className="size-4" aria-hidden="true" />
+                        </span>
+                        <span className="flex-1 min-w-0">
+                          <span className="flex flex-wrap items-center gap-1.5">
+                            <span className="text-sm font-semibold text-foreground">{label}</span>
+                            {o.recommended && (
+                              <Badge className="h-4 px-1.5 text-[9px] font-semibold uppercase tracking-wide bg-accent text-accent-foreground">
+                                Recommended
+                              </Badge>
+                            )}
+                          </span>
+                          <span className="block text-[11px] text-muted-foreground mt-0.5 leading-snug">{description}</span>
+                        </span>
+                      </label>
+
+                      {/* UPI QR backup, under the UPI option */}
+                      {id === "upi" && selected && (
+                        <div className="mt-2 space-y-2">
+                          <button
+                            type="button"
+                            onClick={() => setShowUpiQr((v) => !v)}
+                            aria-expanded={showUpiQr}
+                            className="text-[11px] font-medium text-accent hover:underline underline-offset-2"
+                          >
+                            {showUpiQr ? "Hide QR" : "Having trouble? Scan QR"}
+                          </button>
+                          {showUpiQr && (
+                            <UpiQrBackup
+                              compact
+                              amount={totalWithDeposit}
+                              reference={draftCode}
+                              busy={submitting}
+                              onPaid={(utr) => {
+                                qrSubmitRef.current = utr;
+                                formRef.current?.requestSubmit();
+                              }}
+                            />
                           )}
                         </div>
-                        <p className="text-[11px] text-muted-foreground mt-0.5">{description}</p>
-                      </div>
-                      {selected && <CheckCircle2 className="size-4 text-accent shrink-0" aria-hidden="true" />}
-                    </label>
+                      )}
+                    </div>
                   );
                 })}
               </div>
@@ -2601,7 +2640,7 @@ function ReservePage() {
                 : prepayActive
                 ? `Pay ${formatPaise(estDuePaise)} & Place Order`
                 : isOnlinePaymentMethod(paymentMethod)
-                ? `Pay ₹${totalWithDeposit} with ${PAYMENT_METHODS[paymentMethod].label} & Place Order`
+                ? `Pay ₹${totalWithDeposit} with ${PAYMENT_OPTIONS[paymentOption].label} & Place Order`
                 : orderType === "DINE_IN"
                 ? "Confirm Table & Place Order"
                 : orderType === "TAKEAWAY"

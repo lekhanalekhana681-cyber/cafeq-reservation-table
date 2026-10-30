@@ -51,6 +51,9 @@ type OrderRow = {
   order_type: string;
   status: string;
   payment_state: PaymentState;
+  payment_method?: string | null;
+  payment_status?: string | null;
+  payment_reference?: string | null;
   total_amount_paise: number;
   deposit_due_paise: number;
   amount_paid_paise: number;
@@ -68,7 +71,7 @@ type Listing = {
   daily: Array<{ day: string; collected_paise: number; refunded_paise: number; forfeited_paise: number }>;
 };
 
-type Filter = "all" | "paid" | "pending" | "refunded" | "forfeited";
+type Filter = "all" | "paid" | "pending" | "verify" | "refunded" | "forfeited";
 
 const STATE_CLASS: Record<PaymentState, string> = {
   UNPAID: "bg-neutral-800 text-neutral-400 border-neutral-700",
@@ -356,7 +359,7 @@ export function PaymentsPanel({ defaultIdentifier }: { defaultIdentifier?: strin
       <section className="rounded-2xl border border-neutral-800 bg-neutral-900/60 p-4">
         <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
           <div className="flex flex-wrap gap-1.5">
-            {(["all", "paid", "pending", "refunded", "forfeited"] as Filter[]).map((f) => (
+            {(["all", "paid", "pending", "verify", "refunded", "forfeited"] as Filter[]).map((f) => (
               <button
                 key={f}
                 type="button"
@@ -365,7 +368,7 @@ export function PaymentsPanel({ defaultIdentifier }: { defaultIdentifier?: strin
                   filter === f ? "bg-amber-600 text-neutral-950" : "bg-neutral-950 text-neutral-400 border border-neutral-800 hover:text-neutral-200"
                 }`}
               >
-                {f}
+                {f === "verify" ? "Verify UPI" : f}
               </button>
             ))}
           </div>
@@ -402,6 +405,11 @@ export function PaymentsPanel({ defaultIdentifier }: { defaultIdentifier?: strin
                         <Badge variant="outline" className="text-[10px] border-neutral-700 text-neutral-400 capitalize">
                           {o.status.replace("_", " ")}
                         </Badge>
+                        {o.payment_status === "pending_verification" && (
+                          <Badge variant="outline" className="text-[10px] bg-amber-500/15 text-amber-300 border-amber-500/40">
+                            <QrCode className="size-3 mr-1" /> UPI QR · Pending verification
+                          </Badge>
+                        )}
                       </div>
                       <p className="text-xs text-neutral-300 mt-1">
                         {o.name} · {o.phone} · {o.order_type.replace("_", "-").toLowerCase()} · due {formatIst(o.scheduled_at)}
@@ -411,6 +419,12 @@ export function PaymentsPanel({ defaultIdentifier }: { defaultIdentifier?: strin
                         <span className="text-amber-300">{formatPaise(o.balance_due_paise)}</span>
                         {refundable > 0 && <> · Refundable online {formatPaise(refundable)}</>}
                       </p>
+                      {o.payment_status === "pending_verification" && (
+                        <p className="text-[11px] text-amber-300/90 mt-0.5">
+                          Customer says they paid by UPI QR{o.payment_reference ? ` · UTR ${o.payment_reference}` : ""}. Check your UPI
+                          app, then tap the "UPI" collect button to confirm.
+                        </p>
+                      )}
                       {o.forfeit_reason && <p className="text-[11px] text-rose-300 mt-0.5">Forfeit reason: {o.forfeit_reason}</p>}
                     </div>
 

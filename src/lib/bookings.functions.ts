@@ -37,6 +37,7 @@ import {
   isOnlinePaymentMethod,
   orderHasPreOrder,
   PAYMENT_METHODS,
+  type PaymentMethodId,
 } from "@/lib/payment-methods";
 
 export const orderItemSchema = z.object({
@@ -96,7 +97,7 @@ const bookingSchema = z.object({
   items: z.array(orderItemSchema).max(50).default([]),
   total: z.number().int().min(0).default(0),
   paymentMethod: z.enum(["pay_on_arrival", "upi_prepay", "online_razorpay", "upi_razorpay"]).default("pay_on_arrival"),
-  paymentStatus: z.enum(["pending_cash", "pending_qr", "pending_online", "paid", "failed", "refunded"]).default("pending_cash"),
+  paymentStatus: z.enum(["pending_cash", "pending_qr", "pending_online", "pending_verification", "paid", "failed", "refunded"]).default("pending_cash"),
   paymentReference: z.string().optional().nullable(),
   userId: z.string().optional().nullable(),
   // pending_payment / expired are set by the database for pre-orders awaiting online payment
@@ -693,10 +694,13 @@ export async function updateBookingPaymentStatus({
   code,
   status,
   reference,
+  method,
 }: {
   code: string;
-  status: "paid" | "pending_cash" | "pending_qr" | "pending_online" | "failed" | "refunded";
+  status: "paid" | "pending_cash" | "pending_qr" | "pending_online" | "pending_verification" | "failed" | "refunded";
   reference?: string;
+  /** Switch the payment method too (e.g. to upi_prepay when the customer paid by UPI QR) */
+  method?: PaymentMethodId;
 }) {
   const supabase = getPublicClient();
   if (supabase) {
@@ -706,6 +710,7 @@ export async function updateBookingPaymentStatus({
         payment_status: status,
         payment_reference: reference || null,
         paid_amount: status === "paid" ? 1 : 0, // indicates payment recorded
+        ...(method ? { payment_method: method } : {}),
       })
       .eq("code", code);
 
@@ -724,6 +729,7 @@ export async function updateBookingPaymentStatus({
           ...b,
           paymentStatus: status as any,
           paymentReference: reference || b.paymentReference,
+          ...(method ? { paymentMethod: method } : {}),
         };
         return targetBooking;
       }

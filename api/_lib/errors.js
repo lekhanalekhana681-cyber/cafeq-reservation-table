@@ -34,6 +34,7 @@ const DB_ERRORS = {
   NOTHING_TO_PAY: [400, "There's nothing to pay online for this order."],
   NOT_PAYABLE: [409, "This order can no longer be paid."],
   NOT_AN_ONLINE_ORDER: [400, "This order isn't set up for online payment."],
+  PHONE_MISMATCH: [403, "The phone number doesn't match this order."],
   WIFI_INVALID_SSID: [400, "Enter a network name (1–32 characters)."],
   WIFI_INVALID_PASSWORD: [400, "The WiFi password must be 8–63 characters."],
   WIFI_INVALID_WINDOW: [400, "\"Valid until\" must be after \"Valid from\"."],
