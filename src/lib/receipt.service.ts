@@ -69,7 +69,7 @@ export function generateBill(b: BookingInput): ReceiptData {
     orderId: b.code,
     paymentId: b.paymentReference || undefined,
     paymentMethod:
-      b.paymentMethod === "online_razorpay" ? "Razorpay Online" : b.paymentMethod === "upi_prepay" ? "UPI QR Code" : "Cash at Counter",
+      b.paymentMethod === "online_razorpay" ? "Razorpay Online" : b.paymentMethod === "upi_razorpay" ? "UPI (Razorpay)" : b.paymentMethod === "upi_prepay" ? "UPI QR Code" : "Cash at Counter",
     paymentStatus: b.paymentStatus === "paid" ? "paid" : "pending",
     date: b.date,
     time: b.time,

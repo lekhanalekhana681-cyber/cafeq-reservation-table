@@ -95,7 +95,7 @@ async function runTests() {
     phone: "+91 98765 43210",
     orderType: "DINE_IN",
     tableNumber: "T-4",
-    paymentMethod: "pay_on_arrival",
+    paymentMethod: "online_razorpay",
     paymentStatus: "pending_cash",
     total: 600,
     items: [
