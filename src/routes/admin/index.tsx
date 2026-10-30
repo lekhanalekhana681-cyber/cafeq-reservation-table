@@ -47,6 +47,7 @@ import {
   CheckCheck,
   Activity,
   Wallet,
+  Wifi,
   FileText,
   Info,
   Utensils,
@@ -61,6 +62,7 @@ import {
 } from "@/lib/order-types";
 import { formatItemProgress, ITEM_STATUS_LABELS } from "@/lib/order-items";
 import { PaymentsPanel } from "@/components/admin/PaymentsPanel";
+import { WifiSettingsPanel } from "@/components/admin/WifiSettingsPanel";
 import { formatPaise, PAYMENT_STATE_LABELS } from "@/lib/prepayment";
 import { toast } from "sonner";
 import { getDeliveryLogs, type DeliveryLogRecord } from "@/lib/notifications";
@@ -147,20 +149,20 @@ function AdminDashboardPage() {
   const [resetStaffPasswordInput, setResetStaffPasswordInput] = useState("");
 
   const searchParams = Route.useSearch();
-  // Top-level Admin View Tab ("reservations" | "menu" | "notifications" | "logs" | "payments")
-  const [activeAdminTab, setActiveAdminTab] = useState<"reservations" | "menu" | "notifications" | "logs" | "payments">(
-    (["reservations", "menu", "notifications", "logs", "payments"].includes(searchParams.tab as string)
+  // Top-level Admin View Tab ("reservations" | "menu" | "notifications" | "logs" | "payments" | "wifi")
+  const [activeAdminTab, setActiveAdminTab] = useState<"reservations" | "menu" | "notifications" | "logs" | "payments" | "wifi">(
+    (["reservations", "menu", "notifications", "logs", "payments", "wifi"].includes(searchParams.tab as string)
       ? (searchParams.tab as any)
       : "reservations")
   );
 
   useEffect(() => {
-    if (searchParams.tab && ["reservations", "menu", "notifications", "logs", "payments"].includes(searchParams.tab)) {
+    if (searchParams.tab && ["reservations", "menu", "notifications", "logs", "payments", "wifi"].includes(searchParams.tab)) {
       setActiveAdminTab(searchParams.tab as any);
     }
   }, [searchParams.tab]);
 
-  const handleSelectAdminTab = (tab: "reservations" | "menu" | "notifications" | "logs" | "payments") => {
+  const handleSelectAdminTab = (tab: "reservations" | "menu" | "notifications" | "logs" | "payments" | "wifi") => {
     setActiveAdminTab(tab);
     navigate({ search: { tab } });
   };
@@ -929,6 +931,18 @@ function AdminDashboardPage() {
             >
               <Wallet className="size-4" />
               <span>Payments</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => handleSelectAdminTab("wifi")}
+              className={`flex items-center gap-2 px-3.5 sm:px-4 py-2 rounded-xl text-xs font-semibold transition-all ${
+                activeAdminTab === "wifi"
+                  ? "bg-amber-600 text-neutral-950 shadow-md font-bold"
+                  : "text-neutral-400 hover:text-white"
+              }`}
+            >
+              <Wifi className="size-4" />
+              <span>WiFi</span>
             </button>
           </div>
 
@@ -1899,6 +1913,8 @@ function AdminDashboardPage() {
 
         {/* ── Tab 4: System Activity & Audit Logs ────────────────────────────── */}
         {activeAdminTab === "payments" && <PaymentsPanel defaultIdentifier={admin?.email} />}
+
+        {activeAdminTab === "wifi" && <WifiSettingsPanel defaultIdentifier={admin?.email} />}
 
         {activeAdminTab === "logs" && (
           <div className="space-y-6">

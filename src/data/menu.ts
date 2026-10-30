@@ -1105,7 +1105,21 @@ export type TableType = {
   image: string;
   /** Descriptive alt text for the photo */
   imageAlt: string;
+  /** Small amenity tags shown on the card */
+  features: TableFeature[];
 };
+
+export type TableFeature = "wifi" | "power" | "quiet";
+
+export const TABLE_FEATURE_LABELS: Record<TableFeature, string> = {
+  wifi: "WiFi",
+  power: "Power outlets",
+  quiet: "Quiet zone",
+};
+
+/** "Work-friendly" filter: somewhere to plug in a laptop or concentrate */
+export const isWorkFriendlyTable = (t: Pick<TableType, "features">) =>
+  t.features.includes("power") || t.features.includes("quiet");
 
 /**
  * Table photos — free to use, downloaded into public/images/tables/ (800×500):
@@ -1128,6 +1142,7 @@ export const tableTypes: TableType[] = [
     tag: "High Demand",
     image: "/images/tables/window-2top.jpg",
     imageAlt: "Small wooden cafe table for two beside a sunlit street-view window",
+    features: ["wifi", "power"],
   },
   {
     id: "booth",
@@ -1139,6 +1154,7 @@ export const tableTypes: TableType[] = [
     tag: "Comfort",
     image: "/images/tables/cozy-booth.jpg",
     imageAlt: "Upholstered cafe booth with warm lighting and plants",
+    features: ["wifi", "quiet"],
   },
   {
     id: "courtyard",
@@ -1150,6 +1166,7 @@ export const tableTypes: TableType[] = [
     tag: "Outdoor",
     image: "/images/tables/garden-courtyard.jpg",
     imageAlt: "Outdoor cafe terrace with wooden tables, brick walls and potted greenery",
+    features: [],
   },
   {
     id: "communal",
@@ -1161,6 +1178,7 @@ export const tableTypes: TableType[] = [
     tag: "Work & Social",
     image: "/images/tables/communal-table.jpg",
     imageAlt: "Long shared wooden table with guests working on laptops",
+    features: ["wifi", "power"],
   },
   {
     id: "counter",
@@ -1172,5 +1190,6 @@ export const tableTypes: TableType[] = [
     tag: "Quick Brew",
     image: "/images/tables/espresso-bar.jpg",
     imageAlt: "Espresso bar counter with stools in front of the barista station",
+    features: ["wifi"],
   },
 ];

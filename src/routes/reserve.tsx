@@ -1,6 +1,7 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useMemo, useState, useEffect } from "react";
 import { useAuth } from "@/context/AuthContext";
+import { WifiCard } from "@/components/WifiCard";
 import {
   Check,
   Minus,
@@ -28,12 +29,25 @@ import {
   Bike,
   MapPin,
   Package,
+  Laptop,
+  Plug,
+  VolumeX,
+  Wifi,
+  X,
 } from "lucide-react";
 import { toast } from "sonner";
 import { useQuery } from "@tanstack/react-query";
 import QRCode from "react-qr-code";
 
-import { categories as categoriesRaw, menu as menuRaw, tableTypes as tableTypesRaw, TABLE_IMAGE_PLACEHOLDER, type MenuItem } from "@/data/menu";
+import {
+  categories as categoriesRaw,
+  isWorkFriendlyTable,
+  menu as menuRaw,
+  TABLE_FEATURE_LABELS,
+  tableTypes as tableTypesRaw,
+  TABLE_IMAGE_PLACEHOLDER,
+  type MenuItem,
+} from "@/data/menu";
 import { getOutOfStockItemIds } from "@/lib/stock";
 import { subscribeToKitchenEvents } from "@/lib/kitchen.sync";
 import {
@@ -227,6 +241,7 @@ function ReservePage() {
   const [time, setTime] = useState("09:00");
   const [party, setParty] = useState(2);
   const [selectedTableType, setSelectedTableType] = useState<string>("window");
+  const [workFriendlyOnly, setWorkFriendlyOnly] = useState(false);
   const [hasPriorBookings, setHasPriorBookings] = useState(false);
   const [name, setName] = useState(user?.name || "");
   const [phone, setPhone] = useState(search.phone || user?.phone || "");
@@ -1263,6 +1278,9 @@ function ReservePage() {
           </div>
         )}
 
+        {/* Cafe WiFi: the server only reveals it for a confirmed (and paid) booking at the reservation time */}
+        {orderType === "DINE_IN" && isAuthenticated && <WifiCard code={code} refreshKey={preorderPay?.status} className="mt-6" />}
+
         <div className="mt-8 flex flex-wrap justify-center gap-3">
           <Button variant="outline" asChild>
             <Link to="/history" search={{ phone }}>
@@ -1824,8 +1842,31 @@ function ReservePage() {
                   </span>
                   <h2 className="text-xl font-display">Select Table Type</h2>
                 </div>
-                <div className="mt-6 grid gap-4 sm:grid-cols-2">
-                  {tableTypes.map((table) => {
+                {/* Optional filter: tables with power outlets or a quiet zone */}
+                <div className="mt-4 flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setWorkFriendlyOnly((v) => !v)}
+                    aria-pressed={workFriendlyOnly}
+                    className={`inline-flex items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-xs font-semibold transition-colors ${
+                      workFriendlyOnly
+                        ? "border-accent bg-accent text-accent-foreground shadow-sm"
+                        : "border-border bg-card text-foreground hover:border-accent/60 hover:bg-accent/10"
+                    }`}
+                  >
+                    <Laptop className="size-3.5" aria-hidden="true" />
+                    Work-friendly
+                    {workFriendlyOnly && <X className="size-3" aria-hidden="true" />}
+                  </button>
+                  <span className="text-xs text-muted-foreground">
+                    {workFriendlyOnly ? "Showing tables with power outlets or a quiet zone" : "Need to get some work done?"}
+                  </span>
+                </div>
+                <div className="mt-4 grid gap-4 sm:grid-cols-2">
+                  {tableTypes
+                    // keep the chosen table visible even if it doesn't match the filter
+                    .filter((table) => !workFriendlyOnly || isWorkFriendlyTable(table) || table.id === selectedTableType)
+                    .map((table) => {
                     const isSelected = selectedTableType === table.id;
                     const isCapacityFit = party >= table.minCapacity && party <= table.maxCapacity;
                     const availableLeft = Math.max(1, table.totalTables - (party % 3));
@@ -1869,6 +1910,22 @@ function ReservePage() {
                           <p className="mt-1.5 text-xs text-muted-foreground leading-relaxed">
                             {table.description}
                           </p>
+                          {table.features.length > 0 && (
+                            <ul className="mt-2.5 flex flex-wrap gap-1.5" aria-label="Table features">
+                              {table.features.map((f) => {
+                                const Icon = f === "wifi" ? Wifi : f === "power" ? Plug : VolumeX;
+                                return (
+                                  <li
+                                    key={f}
+                                    className="inline-flex items-center gap-1 rounded-full border border-accent/30 bg-accent/10 px-2 py-0.5 text-[10px] font-medium text-foreground"
+                                  >
+                                    <Icon className="size-3 text-accent" aria-hidden="true" />
+                                    {TABLE_FEATURE_LABELS[f]}
+                                  </li>
+                                );
+                              })}
+                            </ul>
+                          )}
                         </div>
 
                         <div className="mx-4 mb-4 mt-4 pt-3 border-t border-border/50 flex items-center justify-between text-xs">
