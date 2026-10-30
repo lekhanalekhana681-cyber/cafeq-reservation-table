@@ -32,7 +32,7 @@ import { toast } from "sonner";
 import { useQuery } from "@tanstack/react-query";
 import QRCode from "react-qr-code";
 
-import { categories as categoriesRaw, menu as menuRaw, tableTypes as tableTypesRaw, type MenuItem } from "@/data/menu";
+import { categories as categoriesRaw, menu as menuRaw, tableTypes as tableTypesRaw, TABLE_IMAGE_PLACEHOLDER, type MenuItem } from "@/data/menu";
 import { getOutOfStockItemIds } from "@/lib/stock";
 import { subscribeToKitchenEvents } from "@/lib/kitchen.sync";
 import {
@@ -1855,28 +1855,43 @@ function ReservePage() {
                         key={table.id}
                         type="button"
                         onClick={() => setSelectedTableType(table.id)}
-                        className={`flex flex-col justify-between rounded-xl border p-4 text-left transition-all cursor-pointer ${
+                        aria-pressed={isSelected}
+                        className={`group flex flex-col justify-between overflow-hidden rounded-xl border text-left transition-all cursor-pointer ${
                           isSelected
                             ? "border-accent bg-accent/10 shadow-sm ring-1 ring-accent"
                             : "border-border/80 bg-card hover:bg-secondary/40 hover:border-border"
                         } ${!isCapacityFit ? "opacity-75" : ""}`}
                       >
-                        <div>
-                          <div className="flex items-start justify-between gap-2">
-                            <span className="font-semibold text-base text-foreground">{table.name}</span>
-                            <Badge
-                              variant={isSelected ? "default" : "secondary"}
-                              className="text-[10px] font-normal"
-                            >
-                              {table.tag}
-                            </Badge>
-                          </div>
+                        {/* Photo: full width, rounded top corners come from the card's overflow-hidden */}
+                        <div className="relative h-[140px] w-full overflow-hidden bg-muted">
+                          <img
+                            src={table.image}
+                            alt={table.imageAlt}
+                            loading="lazy"
+                            onError={(e) => {
+                              const img = e.currentTarget;
+                              if (!img.src.endsWith(TABLE_IMAGE_PLACEHOLDER)) img.src = TABLE_IMAGE_PLACEHOLDER;
+                            }}
+                            className="h-full w-full object-cover transition-transform duration-500 ease-out group-hover:scale-105"
+                          />
+                          <Badge
+                            variant={isSelected ? "default" : "secondary"}
+                            className={`absolute top-2 right-2 text-[10px] font-normal shadow-sm ${
+                              isSelected ? "" : "bg-background/90 backdrop-blur-sm"
+                            }`}
+                          >
+                            {table.tag}
+                          </Badge>
+                        </div>
+
+                        <div className="px-4 pt-3">
+                          <span className="font-semibold text-base text-foreground">{table.name}</span>
                           <p className="mt-1.5 text-xs text-muted-foreground leading-relaxed">
                             {table.description}
                           </p>
                         </div>
 
-                        <div className="mt-4 pt-3 border-t border-border/50 flex items-center justify-between text-xs">
+                        <div className="mx-4 mb-4 mt-4 pt-3 border-t border-border/50 flex items-center justify-between text-xs">
                           <span className="text-muted-foreground">
                             Seats: {table.minCapacity}–{table.maxCapacity} guests
                           </span>

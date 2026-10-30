@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 500" role="img" aria-label="Table photo unavailable">
+  <!-- Content stays inside the centre band (y≈110–390) that object-fit: cover keeps at card size -->
+  <rect width="800" height="500" fill="#e7e1d8"/>
+  <g fill="none" stroke="#a8998a" stroke-width="12" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M300 180h200"/>
+    <path d="M330 180v90M470 180v90"/>
+    <path d="M270 220v60M270 220h30M530 220v60M530 220h-30"/>
+  </g>
+  <text x="400" y="335" text-anchor="middle" font-family="Arial, sans-serif" font-size="32" fill="#8a7b6c">Photo coming soon</text>
+</svg>
