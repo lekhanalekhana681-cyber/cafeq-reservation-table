@@ -216,7 +216,8 @@ async function postJson<T>(path: string, body: unknown, token?: string): Promise
   return data as T;
 }
 
-export type CheckoutMethod = "razorpay" | "upi";
+/** Which Razorpay Checkout screen to open: everything ("razorpay"), or just UPI / cards / netbanking. */
+export type CheckoutMethod = "razorpay" | "upi" | "card" | "netbanking";
 
 export type CreatePaymentOrderResponse = {
   method: CheckoutMethod;
@@ -246,6 +247,14 @@ export const cancelPreorder = (code: string, phone: string, reason?: string) =>
     { code, phone, reason }
   );
 
+/** "I have paid" after scanning the UPI QR backup → order marked "Pending verification" for staff. */
+export const claimUpiQrPayment = (code: string, phone: string, reference?: string) =>
+  postJson<{ order: { code: string; paymentStatus: string; status: string } }>("/api/payments/upi-claim", {
+    code,
+    phone,
+    reference: reference?.trim() || undefined,
+  });
+
 export const paymentsAdminApi = <T = any>(token: string | null, action: string, params: Record<string, unknown> = {}) =>
   postJson<T>("/api/payments/admin", { action, ...params }, token || undefined);
 
@@ -256,17 +265,19 @@ export type CheckoutOutcome =
   | { status: "dismissed" }
   | { status: "failed"; message: string };
 
-/** Razorpay Checkout display config: UPI only, or cards/netbanking/wallets without UPI. */
+/** Razorpay Checkout display config: only the chosen method, or everything except UPI for "razorpay". */
 function checkoutDisplayConfig(method: CheckoutMethod) {
-  return method === "upi"
-    ? {
-        display: {
-          blocks: { upi: { name: "Pay with UPI", instruments: [{ method: "upi" }] } },
-          sequence: ["block.upi"],
-          preferences: { show_default_blocks: false },
-        },
-      }
-    : { display: { hide: [{ method: "upi" }], preferences: { show_default_blocks: true } } };
+  const only = (name: string, label: string) => ({
+    display: {
+      blocks: { only: { name: label, instruments: [{ method: name }] } },
+      sequence: ["block.only"],
+      preferences: { show_default_blocks: false },
+    },
+  });
+  if (method === "upi") return only("upi", "Pay with UPI");
+  if (method === "card") return only("card", "Pay with a credit or debit card");
+  if (method === "netbanking") return only("netbanking", "Pay with netbanking");
+  return { display: { hide: [{ method: "upi" }], preferences: { show_default_blocks: true } } };
 }
 
 const log = (...args: unknown[]) => console.info("[payments]", ...args);
@@ -315,7 +326,7 @@ export async function payOnline(
         name: order.customer.name,
         email: order.customer.email,
         contact: order.customer.phone,
-        ...(method === "upi" ? { method: "upi" } : {}),
+        ...(method !== "razorpay" ? { method } : {}),
       },
       notes: { booking_code: code },
       theme: { color: "#c2410c" },

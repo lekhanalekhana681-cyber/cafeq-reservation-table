@@ -53,6 +53,7 @@ const MIGRATIONS = [
   "20261031000000_order_status_flow.sql",
   "20261101000000_billed_status.sql",
   "20261102000000_online_payment_methods.sql",
+  "20261104000000_upi_qr_backup.sql",
 ];
 
 /** Fake Razorpay gateway: same shape as createRazorpayClient, real HMAC signatures. */
@@ -522,11 +523,9 @@ async function runTests() {
     "Cash payment is not available for food pre-orders",
     "Food pre-order with cash is rejected by the database (check_violation → HTTP 400)"
   );
-  await expectError(
-    () => placeOrder({ ...istSlot(-5), payment_method: "upi_prepay" }),
-    "must be paid online",
-    "Food pre-order with the unverified UPI QR option is rejected"
-  );
+  const qrWalkIn = await placeOrder({ ...istSlot(-5), payment_method: "upi_prepay" });
+  b = await getBooking(qrWalkIn);
+  assert(b.payment_method === "upi_prepay", "Food pre-order may use the UPI QR backup (it isn't cash)");
   const tableOnlyCash = await placeOrder({ ...istSlot(60), items: "[]", payment_method: "pay_on_arrival" });
   b = await getBooking(tableOnlyCash);
   assert(b.payment_method === "pay_on_arrival", "Table-only booking can still choose cash");
@@ -566,6 +565,66 @@ async function runTests() {
   const noDeposit = await placeOrder({ ...istSlot(60), items: "[]", payment_method: "online_razorpay" });
   await expectError(() => service.createOrder({ code: noDeposit }), "NOTHING_TO_PAY", "Nothing to pay online → clear error");
   await expectError(() => service.createOrder({ code: tableOnlyCash }), "NOT_AN_ONLINE_ORDER", "Cash order can't open online checkout");
+
+  // --------------------------------------------------------------------------
+  // SUITE 7d: UPI QR backup — "I have paid" → Pending verification → staff confirm
+  // --------------------------------------------------------------------------
+  console.log("\nSuite 7d: UPI QR Backup");
+
+  // Pre-order held for its deposit (the gateway failed), customer scans the QR instead
+  const held = await placeOrder({ payment_method: "upi_prepay" });
+  b = await getBooking(held);
+  assert(b.status === "pending_payment" && b.payment_required, "Pre-order is held for payment as usual");
+  await expectError(
+    () => asAnon("SELECT public.pay_claim_upi_qr($1, $2, $3)", [held, "+91 98765 43210", null]),
+    "permission denied",
+    "The public key can't call the claim function (server only)"
+  );
+  await expectError(
+    () => asAnon("UPDATE public.bookings SET payment_status = 'pending_verification' WHERE code = $1", [held]),
+    "PAYMENT_FIELDS_READ_ONLY",
+    "…nor flag a held pre-order directly"
+  );
+  await expectError(
+    () => db.rpc("pay_claim_upi_qr", { _code: held, _phone: "+91 90000 11111", _reference: null }),
+    "PHONE_MISMATCH",
+    "Claim with someone else's phone number is refused"
+  );
+  const claimed = await db.rpc("pay_claim_upi_qr", { _code: held, _phone: "98765 43210", _reference: "403829104829" });
+  b = await getBooking(held);
+  assert(
+    claimed.booking.payment_status === "pending_verification" && b.payment_method === "upi_prepay" && b.payment_reference === "403829104829",
+    "\"I have paid\" → Pending verification, method UPI QR, UTR saved"
+  );
+  assert(b.status === "pending" && b.payment_expires_at === null && b.payment_state === "PENDING", "Hold released (no 15-min expiry); not marked paid");
+  const claimedTwice = await db.rpc("pay_claim_upi_qr", { _code: held, _phone: "+919876543210", _reference: "other" });
+  assert(claimedTwice.booking.payment_reference === "403829104829", "Tapping \"I have paid\" twice changes nothing");
+
+  const verifyList = await service.list({ filter: "verify" });
+  const listed = verifyList.orders.find((o: any) => o.code === held);
+  assert(!!listed && listed.payment_status === "pending_verification" && listed.balance_due_paise > 0, "Shows in Admin › Payments under \"Verify UPI\"");
+
+  // Table booking without a deposit, paid by QR (flagged at insert, no server call needed)
+  const tableQr = await placeOrder({ ...istSlot(60), items: "[]", total: 300, payment_method: "upi_prepay", payment_status: "pending_verification" });
+  const tableListed = (await service.list({ filter: "verify" })).orders.find((o: any) => o.code === tableQr);
+  assert(!!tableListed && tableListed.balance_due_paise === 30000, "Table-only QR payment is listed for staff too (₹300)");
+
+  await service.collectBalance({ code: held, method: "upi", actor: "admin:Cashier" });
+  b = await getBooking(held);
+  assert(b.payment_state === "PAID" && b.payment_status === "paid" && b.balance_due_paise === 0, "Staff confirm with \"UPI\" collect → PAID");
+  assert(!(await service.list({ filter: "verify" })).orders.some((o: any) => o.code === held), "…and it leaves the Verify UPI list");
+  await expectError(
+    () => db.rpc("pay_claim_upi_qr", { _code: held, _phone: "9876543210", _reference: null }),
+    "ORDER_ALREADY_PAID",
+    "Claiming an order that's already paid is refused"
+  );
+  const cancelledQr = await placeOrder({ ...istSlot(60), items: "[]", payment_method: "upi_prepay" });
+  await asAnon("UPDATE public.bookings SET status = 'cancelled' WHERE code = $1", [cancelledQr]);
+  await expectError(
+    () => db.rpc("pay_claim_upi_qr", { _code: cancelledQr, _phone: "9876543210", _reference: null }),
+    "NOT_PAYABLE",
+    "Cancelled order can't be claimed"
+  );
 
   // --------------------------------------------------------------------------
   // SUITE 8: HTTP adapters (PostgREST RPC + Razorpay REST) with a mocked fetch

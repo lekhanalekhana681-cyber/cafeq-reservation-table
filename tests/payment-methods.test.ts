@@ -1,9 +1,10 @@
 /**
  * Automated Test Suite for checkout payment-method rules
  * Tests:
- * 1. getAllowedPaymentMethods(hasPreOrder): food pre-order → Razorpay + UPI only; table only → existing options.
- * 2. Auto-switch when the cart changes (cash selected + food added → Razorpay).
+ * 1. Options in order UPI (recommended) → Cards → Netbanking; cash only for table bookings without food.
+ * 2. Auto-switch when the cart changes (cash selected + food added → UPI).
  * 3. createBooking refuses cash for a food pre-order and defaults pre-orders to Razorpay.
+ * 4. UPI QR backup link: amount follows the order total, reservation ID as the note, UPI ID from config.
  * (Database / API enforcement and the Razorpay flow are covered in preorder-payments.test.ts.)
  */
 
@@ -59,20 +60,36 @@ async function runTests() {
   console.log("  Running CafeQ Payment Method Rules Test Suite");
   console.log("==================================================\n");
 
-  const { getAllowedPaymentMethods, resolvePaymentMethod, orderHasPreOrder, PAYMENT_METHODS, isOnlinePaymentMethod } =
-    await import("../src/lib/payment-methods");
+  const {
+    getAllowedPaymentMethods,
+    getPaymentOptions,
+    resolvePaymentOption,
+    resolvePaymentMethod,
+    orderHasPreOrder,
+    PAYMENT_METHODS,
+    PAYMENT_OPTIONS,
+    isOnlinePaymentMethod,
+  } = await import("../src/lib/payment-methods");
+  const { buildUpiPaymentLink, CAFE_UPI_ID } = await import("../src/lib/upi");
   const { createBooking, getAllBookings } = await import("../src/lib/bookings.functions");
 
   // --------------------------------------------------------------------------
   console.log("Suite 1: Allowed Methods");
 
-  const pre = getAllowedPaymentMethods(true);
-  assert(pre.join(",") === "online_razorpay,upi_razorpay", `Food pre-order → only Razorpay + UPI (${pre.join(", ")})`);
-  assert(!pre.some((m) => PAYMENT_METHODS[m].cash), "Food pre-order → no cash option");
-  assert(pre.every((m) => isOnlinePaymentMethod(m)), "Both pre-order options go through the verified online flow");
-  assert(PAYMENT_METHODS.upi_razorpay.checkoutMethod === "upi", "UPI uses Razorpay's UPI method");
-  const tableOnly = getAllowedPaymentMethods(false);
-  assert(tableOnly.join(",") === "online_razorpay,upi_prepay,pay_on_arrival", "Table booking only → existing options unchanged");
+  const pre = getPaymentOptions(true);
+  assert(pre.join(",") === "upi,card,netbanking", `Food pre-order → UPI, Cards, Netbanking in that order (${pre.join(", ")})`);
+  assert(!pre.some((o) => PAYMENT_OPTIONS[o].cash), "Food pre-order → no cash option");
+  assert(!getAllowedPaymentMethods(true).includes("pay_on_arrival"), "Food pre-order → cash can't be stored either");
+  assert(PAYMENT_OPTIONS.upi.recommended === true && pre[0] === "upi", "UPI is first and marked Recommended");
+  assert(
+    PAYMENT_OPTIONS.upi.checkoutMethod === "upi" && PAYMENT_OPTIONS.card.checkoutMethod === "card" && PAYMENT_OPTIONS.netbanking.checkoutMethod === "netbanking",
+    "Each option opens Razorpay on just that method"
+  );
+  assert(pre.every((o) => isOnlinePaymentMethod(PAYMENT_OPTIONS[o].method)), "All three go through the verified online flow");
+  const tableOnly = getPaymentOptions(false);
+  assert(tableOnly.join(",") === "upi,card,netbanking,cash", "Table booking only → same three + Pay at Counter (cash)");
+  assert(getAllowedPaymentMethods(true).includes("upi_prepay"), "UPI QR backup is allowed for pre-orders (it isn't cash)");
+  assert(PAYMENT_METHODS.upi_prepay.online === false, "UPI QR isn't treated as a verified online payment");
 
   assert(orderHasPreOrder([{ fulfillment: "pre_ordered" }]), "Item ready on arrival → pre-order");
   assert(!orderHasPreOrder([{ fulfillment: "at_table" }]), "Items ordered at the table only → not a pre-order");
@@ -81,11 +98,10 @@ async function runTests() {
   // --------------------------------------------------------------------------
   console.log("\nSuite 2: Cart Changes");
 
-  assert(resolvePaymentMethod("pay_on_arrival", true) === "online_razorpay", "Cash selected, food added → auto-switch to Razorpay");
-  assert(resolvePaymentMethod("upi_prepay", true) === "online_razorpay", "QR UPI selected, food added → auto-switch to Razorpay");
-  assert(resolvePaymentMethod("upi_razorpay", true) === "upi_razorpay", "UPI (Razorpay) stays selected with food");
-  assert(resolvePaymentMethod("pay_on_arrival", false) === "pay_on_arrival", "Food removed → cash allowed again, selection kept");
-  assert(resolvePaymentMethod("upi_razorpay", false) === "online_razorpay", "Food removed while on UPI (Razorpay) → Razorpay (still online)");
+  assert(resolvePaymentOption("cash", true) === "upi", "Cash selected, food added → auto-switch to UPI");
+  assert(resolvePaymentOption("netbanking", true) === "netbanking", "Netbanking stays selected with food");
+  assert(resolvePaymentOption("cash", false) === "cash", "Food removed → cash allowed again, selection kept");
+  assert(resolvePaymentMethod("pay_on_arrival", true) === "online_razorpay", "Stored method: cash on a pre-order → Razorpay");
 
   // --------------------------------------------------------------------------
   console.log("\nSuite 3: createBooking Enforcement");
@@ -123,6 +139,22 @@ async function runTests() {
   await createBooking({ data: { ...base, code: "CQ-PM-04", items: [], paymentMethod: "pay_on_arrival", total: 0 } as any });
   b = (await getAllBookings()).find((x) => x.code === "CQ-PM-04");
   assert(b?.paymentMethod === "pay_on_arrival", "Table booking only with cash is accepted (unchanged)");
+
+  // --------------------------------------------------------------------------
+  console.log("\nSuite 4: UPI QR Backup Link");
+
+  assert(CAFE_UPI_ID === "dummycafe@upi", "Dummy UPI ID until VITE_CAFE_UPI_ID is set");
+  const link = buildUpiPaymentLink({ amount: 360, reference: "CQ-AB12" });
+  assert(
+    link === "upi://pay?pa=dummycafe@upi&pn=Cafe%20Name&am=360.00&cu=INR&tn=CQ-AB12",
+    `upi://pay link with amount and reservation ID: ${link}`
+  );
+  assert(buildUpiPaymentLink({ amount: 504.5, reference: "CQ-AB12" }).includes("&am=504.50&"), "Amount follows the order total (₹504.50)");
+  assert(
+    buildUpiPaymentLink({ amount: 100, reference: "CQ 1&x", upiId: "real@okhdfc", payeeName: "Brew & Co" }) ===
+      "upi://pay?pa=real@okhdfc&pn=Brew%20%26%20Co&am=100.00&cu=INR&tn=CQ%201%26x",
+    "Real UPI ID / name can be swapped in; values are URL-encoded"
+  );
 
   console.log("\n==================================================");
   console.log(`  Tests Completed: ${testsPassed + testsFailed}`);

@@ -585,6 +585,12 @@ function HistoryPage() {
                         </Badge>
                       )}
 
+                      {b.paymentStatus === "pending_verification" && !isCancelled && (
+                        <Badge variant="outline" className="text-xs text-amber-600 dark:text-amber-400 border-amber-500/40 bg-amber-500/10">
+                          UPI payment · Pending verification
+                        </Badge>
+                      )}
+
                       {isCancelled ? (
                         <Badge variant="destructive" className="text-xs">
                           Cancelled
