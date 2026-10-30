@@ -24,6 +24,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { useAuth } from "@/context/AuthContext";
+import { WifiCard } from "@/components/WifiCard";
 import { getUserBookings, cancelBooking, withKitchenState, type BookingInput } from "@/lib/bookings.functions";
 import {
   formatItemProgress,
@@ -791,6 +792,11 @@ function HistoryPage() {
                       ))}
                     </div>
                   </div>
+                )}
+
+                {/* Cafe WiFi for the customer's own dine-in reservations from today on (the server enforces the exact window) */}
+                {user && typeDetails.type === "DINE_IN" && (isUpcoming || b.date >= new Date().toISOString().slice(0, 10)) && !["cancelled", "no_show", "expired"].includes(b.status) && (
+                  <WifiCard code={b.code} refreshKey={b.status} className="mt-5" />
                 )}
 
                 {/* Footer notes & total */}

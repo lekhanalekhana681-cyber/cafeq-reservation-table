@@ -45,3 +45,34 @@ export async function loginAdmin(db, { identifier, password }) {
   if (!ok) throw new PaymentError(401, "UNAUTHORIZED", "Invalid administrator credentials.");
   return { id: user.id, name: user.name };
 }
+
+// ─── Customer sessions (cafe WiFi) ────────────────────────────────────────────
+// The browser's own login token is signed client-side, so the server can't trust it.
+// At login the customer's password is checked here (bcrypt, server side) and a separate
+// server-signed token is issued. role "customer" — it can never pass verifyAdminToken.
+
+const CUSTOMER_TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000; // matches the customer session length
+
+export function issueCustomerToken(user, { env = process.env, now = Date.now() } = {}) {
+  const payload = b64url(JSON.stringify({ sub: user.id, role: "customer", exp: now + CUSTOMER_TOKEN_TTL_MS }));
+  return `${payload}.${sign(payload, getSecret(env))}`;
+}
+
+export function verifyCustomerToken(token, { env = process.env, now = Date.now() } = {}) {
+  const fail = () => new PaymentError(401, "LOGIN_REQUIRED", "Please log in again to see the cafe WiFi.");
+  const [payload, sig] = String(token || "").split(".");
+  if (!payload || !sig) throw fail();
+  const expected = sign(payload, getSecret(env));
+  if (sig.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) throw fail();
+  const claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+  if (claims.role !== "customer" || !claims.sub || !claims.exp || claims.exp < now) throw fail();
+  return claims;
+}
+
+export async function loginCustomer(db, { email, password }) {
+  if (!email || !password) throw new PaymentError(400, "BAD_REQUEST", "Enter your email and password.");
+  const user = await db.rpc("pay_admin_user", { _identifier: email });
+  const ok = user && !user.is_disabled && bcrypt.compareSync(password, user.password_hash);
+  if (!ok) throw new PaymentError(401, "UNAUTHORIZED", "Incorrect email or password.");
+  return { id: user.id };
+}

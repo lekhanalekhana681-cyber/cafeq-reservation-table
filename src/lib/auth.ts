@@ -1,6 +1,7 @@
 import bcrypt from "bcryptjs";
 import { createClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
+import { clearWifiSession, requestWifiSession } from "@/lib/wifi";
 
 export type UserRole = "user" | "admin" | "kitchen";
 
@@ -586,6 +587,8 @@ export async function registerUser({
   saveLocalUsers(localUsers);
 
   const session = saveSession(newUser, USER_SESSION_TIMEOUT_MS);
+  // Server-verified session for the cafe WiFi card (runs in the background, never blocks sign-up)
+  if (supabase) void requestWifiSession(cleanEmail, password, newUser.id);
 
   return {
     success: true,
@@ -680,6 +683,8 @@ export async function loginUser({
   };
 
   const session = saveSession(user, USER_SESSION_TIMEOUT_MS);
+  // Server-verified session for the cafe WiFi card (runs in the background, never blocks login)
+  if (supabase) void requestWifiSession(cleanEmail, password, user.id);
 
   return {
     success: true,
@@ -895,6 +900,7 @@ export function logoutAdmin(): void {
 export function logoutUser(): void {
   try {
     safeRemoveItem(STORAGE_SESSION_KEY);
+    clearWifiSession();
     safeRemoveItem(STORAGE_ADMIN_SESSION_KEY);
     safeRemoveItem(STORAGE_KITCHEN_SESSION_KEY);
     if (typeof sessionStorage !== "undefined") {
