@@ -25,7 +25,7 @@ import {
 } from "lucide-react";
 
 import tableReserved from "@/assets/table-reserved.jpg";
-import aaravImg from "@/assets/aarav.jpg";
+import lekhanaImg from "@/assets/lekhana.jpg";
 import chandanaImg from "@/assets/chandana.jpg";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -71,11 +71,11 @@ const facilities = [
 // ─── Owners ───────────────────────────────────────────────────────────────────
 const owners = [
   {
-    name: "Aarav Sharma",
+    name: "Lekhana",
     role: "Co-Founder & Coffee Director",
     bio:
-      "Aarav grew up watching traditional filter coffee brewing before sunrise — and never stopped chasing that ritual. After years in tech and a stint learning espresso in Coorg, he brought both worlds together to build CAFEQ: a place where the Wi-Fi is fast and the coffee is even faster. He curates the beans, oversees sourcing, and still personally signs off on every new menu item.",
-    image: aaravImg,
+      "Lekhana grew up watching traditional filter coffee brewing before sunrise — and never stopped chasing that ritual. After years in tech and a stint learning espresso in Coorg, Lekhana brought both worlds together to build CAFEQ: a place where the Wi-Fi is fast and the coffee is even faster. Lekhana curates the beans, oversees sourcing, and still personally signs off on every new menu item.",
+    image: lekhanaImg,
   },
   {
     name: "Chandana",
@@ -370,7 +370,7 @@ function VisitPage() {
             Monday mornings survivable. That's still the only brief we follow."
           </p>
           <footer className="mt-3 text-sm font-medium text-accent">
-            — Aarav &amp; Chandana, Co-Founders
+            — Lekhana &amp; Chandana, Co-Founders
           </footer>
         </blockquote>
       </section>

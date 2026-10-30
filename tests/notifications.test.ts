@@ -75,7 +75,7 @@ async function runTests() {
     recipient: "+91 98765 43210",
     customerEmail: "priya@example.com",
     customerPhone: "+91 98765 43210",
-    customerName: "Priya Sharma",
+    customerName: "Priya Nair",
     bookingCode: "BK-NOTIF1",
     date: "2026-10-22",
     time: "19:30",
