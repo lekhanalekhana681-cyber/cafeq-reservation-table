@@ -302,6 +302,18 @@ export function createPaymentService({ db, razorpay, webhookSecret, notify = asy
         return { order: summary(res.booking) };
       }),
 
+    confirmUpiQr: ({ code, actor }) =>
+      run(async () => {
+        const res = await db.rpc("pay_confirm_upi_qr", { _code: code, _actor: actor });
+        return { order: summary(res.booking) };
+      }),
+
+    rejectUpiQr: ({ code, actor, reason }) =>
+      run(async () => {
+        const res = await db.rpc("pay_reject_upi_qr", { _code: code, _actor: actor, _reason: reason || null });
+        return { order: summary(res.booking) };
+      }),
+
     list: ({ filter = "all" } = {}) =>
       run(async () => ({
         ...(await db.rpc("pay_list", { _filter: filter, _limit: 200 })),

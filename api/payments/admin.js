@@ -4,7 +4,8 @@
  * - every other action needs  Authorization: Bearer <token>
  *   list { filter }, refund { code, amountPaise? }, forfeit { code, reason },
  *   no_show { code }, cancel { code, reason } (cafe cancel → full refund),
- *   collect { code, method: "cash" | "upi" }, settings { settings }
+ *   collect { code, method: "cash" | "upi" }, settings { settings },
+ *   upi_confirm { code } (UPI QR payment checked → PAID), upi_reject { code, reason? }
  * Every change is written to payment_audit_log with the admin's name.
  */
 import { PaymentError } from "../_lib/errors.js";
@@ -36,6 +37,10 @@ export const POST = route(async (request) => {
       return json(200, await service.cancelOrder(body.code, actor, body.reason || "Cancelled by the cafe"));
     case "collect":
       return json(200, await service.collectBalance({ code: body.code, method: body.method, actor }));
+    case "upi_confirm":
+      return json(200, await service.confirmUpiQr({ code: body.code, actor }));
+    case "upi_reject":
+      return json(200, await service.rejectUpiQr({ code: body.code, actor, reason: body.reason }));
     case "settings":
       return json(200, await service.updateSettings({ settings: body.settings || {}, actor }));
     default:

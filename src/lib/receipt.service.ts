@@ -56,6 +56,8 @@ export function generateBill(b: BookingInput): ReceiptData {
   const items = (b.items || []).filter((i) => i.status !== "CANCELLED");
   const totals = computeBillTotals(items);
   const type = getOrderTypeDetails(b.orderType);
+  // Takeaway parcel charge (flat, no GST), as stored on the order
+  const parcelCharge = type.type === "TAKEAWAY" ? round2(Math.max(0, Number(b.packagingCharge ?? 0))) : 0;
   const where =
     type.type === "DINE_IN"
       ? `Dine-in · Table ${b.tableNumber || b.seating || "-"}`
@@ -84,7 +86,8 @@ export function generateBill(b: BookingInput): ReceiptData {
     sgst: totals.sgst,
     taxAmount: totals.taxAmount,
     depositAmount: 0,
-    total: totals.grandTotal,
+    parcelCharge,
+    total: round2(totals.grandTotal + parcelCharge),
     totalLabel: "GRAND TOTAL",
     createdAt: new Date().toISOString(),
   };
@@ -110,6 +113,8 @@ export interface ReceiptData {
   sgst: number;
   taxAmount: number;
   depositAmount: number;
+  /** Takeaway parcel charge (₹), shown as its own line */
+  parcelCharge?: number;
   total: number;
   /** Label for the final line; defaults to "TOTAL PAID" (payment receipts). */
   totalLabel?: string;
@@ -285,6 +290,12 @@ export function generateReceiptPdf(data: ReceiptData): jsPDF {
   y += 5;
   doc.text(`SGST (${pct(BILL_TAX_RATES.sgst)}):`, colLabel, y);
   doc.text(`INR ${data.sgst.toFixed(2)}`, colVal, y, { align: "right" });
+
+  if ((data.parcelCharge ?? 0) > 0) {
+    y += 5;
+    doc.text("Parcel Charge:", colLabel, y);
+    doc.text(`INR ${data.parcelCharge!.toFixed(2)}`, colVal, y, { align: "right" });
+  }
 
   if (data.depositAmount > 0) {
     y += 5;

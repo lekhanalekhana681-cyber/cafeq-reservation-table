@@ -30,6 +30,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { PageBackground } from "@/components/PageBackground";
+import { CAFE_UPI_ID } from "@/lib/upi";
 
 // ─── Route ────────────────────────────────────────────────────────────────────
 export const Route = createFileRoute("/events")({
@@ -392,7 +393,7 @@ function EventsPage() {
       {activeEvent && (
         <RegistrationPanel
           event={activeEvent}
-          upiId={settings?.upiId ?? "cafeq@upi"}
+          upiId={settings?.upiId ?? CAFE_UPI_ID}
           upiPayeeName={settings?.upiPayeeName ?? "Cafeq"}
           onClose={() => setActiveEvent(null)}
         />

@@ -15,6 +15,8 @@ export default defineConfig({
     tailwindcss(),
     tsconfigPaths(),
   ],
+  // VITE_* plus the two public UPI values (CAFE_UPI_ID, CAFE_PAYEE_NAME) reach the browser
+  envPrefix: ["VITE_", "CAFE_UPI_ID", "CAFE_PAYEE_NAME"],
   server: {
     port: 3000,
     host: true,

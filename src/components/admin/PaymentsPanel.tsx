@@ -12,6 +12,7 @@ import {
   Settings2,
   UserX,
   Wallet,
+  XCircle,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
@@ -54,6 +55,7 @@ type OrderRow = {
   payment_method?: string | null;
   payment_status?: string | null;
   payment_reference?: string | null;
+  packaging_charge?: number | null;
   total_amount_paise: number;
   deposit_due_paise: number;
   amount_paid_paise: number;
@@ -410,6 +412,11 @@ export function PaymentsPanel({ defaultIdentifier }: { defaultIdentifier?: strin
                             <QrCode className="size-3 mr-1" /> UPI QR · Pending verification
                           </Badge>
                         )}
+                        {o.payment_method === "upi_prepay" && o.payment_status === "failed" && (
+                          <Badge variant="outline" className="text-[10px] bg-rose-500/15 text-rose-300 border-rose-500/40">
+                            <QrCode className="size-3 mr-1" /> UPI QR · Rejected
+                          </Badge>
+                        )}
                       </div>
                       <p className="text-xs text-neutral-300 mt-1">
                         {o.name} · {o.phone} · {o.order_type.replace("_", "-").toLowerCase()} · due {formatIst(o.scheduled_at)}
@@ -418,18 +425,44 @@ export function PaymentsPanel({ defaultIdentifier }: { defaultIdentifier?: strin
                         Total {formatPaise(o.total_amount_paise)} · Paid {formatPaise(o.amount_paid_paise)} · Balance{" "}
                         <span className="text-amber-300">{formatPaise(o.balance_due_paise)}</span>
                         {refundable > 0 && <> · Refundable online {formatPaise(refundable)}</>}
+                        {Number(o.packaging_charge) > 0 && <> · incl. parcel ₹{Number(o.packaging_charge)}</>}
                       </p>
                       {o.payment_status === "pending_verification" && (
-                        <p className="text-[11px] text-amber-300/90 mt-0.5">
-                          Customer says they paid by UPI QR{o.payment_reference ? ` · UTR ${o.payment_reference}` : ""}. Check your UPI
-                          app, then tap the "UPI" collect button to confirm.
-                        </p>
+                        <div className="mt-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-[11px] text-amber-200">
+                          <p className="font-mono">
+                            Amount <strong>{formatPaise(o.balance_due_paise > 0 ? o.balance_due_paise : o.total_amount_paise)}</strong>
+                            {" "}· Reservation <strong>#{o.code}</strong> · UTR <strong>{o.payment_reference || "—"}</strong>
+                          </p>
+                          <p className="text-amber-300/80 mt-0.5">
+                            Check this UTR and amount in your UPI app, then Confirm (marks it PAID) or Reject.
+                          </p>
+                        </div>
                       )}
                       {o.forfeit_reason && <p className="text-[11px] text-rose-300 mt-0.5">Forfeit reason: {o.forfeit_reason}</p>}
                     </div>
 
                     <div className="flex flex-wrap gap-1.5">
-                      {active && o.balance_due_paise > 0 && (
+                      {o.payment_status === "pending_verification" && (
+                        <>
+                          <Button size="sm" disabled={busy} className="h-8 text-[11px] bg-emerald-700 hover:bg-emerald-600 text-white"
+                            onClick={() => {
+                              if (window.confirm(`Confirm the UPI payment for #${o.code} (UTR ${o.payment_reference || "—"})? It will be marked PAID.`)) {
+                                act(o.code, "upi_confirm", {}, `UPI payment confirmed — #${o.code} is PAID`);
+                              }
+                            }}>
+                            <CheckCircle2 className="size-3.5 mr-1" /> Confirm
+                          </Button>
+                          <Button size="sm" disabled={busy} variant="outline" className="h-8 text-[11px] border-rose-700 text-rose-300 bg-transparent"
+                            onClick={() => {
+                              const reason = window.prompt(`Reject the UPI payment for #${o.code}? Optional reason (e.g. "UTR not found"):`);
+                              if (reason === null) return;
+                              act(o.code, "upi_reject", { reason }, `UPI payment for #${o.code} rejected`);
+                            }}>
+                            <XCircle className="size-3.5 mr-1" /> Reject
+                          </Button>
+                        </>
+                      )}
+                      {active && o.balance_due_paise > 0 && o.payment_status !== "pending_verification" && (
                         <>
                           <Button size="sm" disabled={busy} className="h-8 text-[11px] bg-emerald-700 hover:bg-emerald-600 text-white"
                             onClick={() => act(o.code, "collect", { method: "cash" }, `Collected ${formatPaise(o.balance_due_paise)} in cash`)}>
