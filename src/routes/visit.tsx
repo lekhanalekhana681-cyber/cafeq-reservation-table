@@ -31,6 +31,7 @@ import chandanaImg from "@/assets/chandana.jpg";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { CafeMap } from "@/components/CafeMap";
+import { SOCIAL_LINKS } from "@/config/social-links";
 import { CAFE_DIRECTIONS_URL, CAFE_HOURS, CAFE_LOCATION, CAFE_PHONE_HREF } from "@/config/cafe-location";
 import { Label } from "@/components/ui/label";
 
@@ -395,24 +396,37 @@ function VisitPage() {
 
       {/* ── NEW: Instagram / Follow us ──────────────────────────────────── */}
       <section className="text-center">
-        <div className="inline-flex items-center justify-center size-14 rounded-2xl bg-gradient-to-br from-purple-500 via-pink-500 to-orange-400 mb-4">
+        <a
+          href={SOCIAL_LINKS.instagram}
+          target="_blank"
+          rel="noopener noreferrer"
+          title="Follow CafeQ on Instagram"
+          aria-hidden="true"
+          tabIndex={-1}
+          className="inline-flex items-center justify-center size-14 rounded-2xl bg-gradient-to-br from-purple-500 via-pink-500 to-orange-400 mb-4 cursor-pointer transition-transform hover:scale-105"
+        >
           <Instagram className="size-7 text-white" aria-hidden="true" />
-        </div>
+        </a>
         <h2 className="text-2xl font-semibold">Follow us on Instagram</h2>
         <p className="mt-2 text-muted-foreground text-sm max-w-sm mx-auto">
           Behind-the-scenes brews, seasonal specials, event highlights and latte art — straight from our counter to your feed.
         </p>
-        <a
-          href="https://www.instagram.com/cafeq.bangalore"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="mt-5 inline-block"
+        <Button
+          asChild
+          variant="outline"
+          className="mt-5 min-h-11 min-w-11 cursor-pointer transition-all hover:scale-[1.03] hover:text-accent hover:border-accent/50"
         >
-          <Button variant="outline">
-            <Instagram className="size-4 mr-2" />
-            @cafeq.bangalore
-          </Button>
-        </a>
+          <a
+            href={SOCIAL_LINKS.instagram}
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label="Follow CafeQ on Instagram"
+            title="Follow CafeQ on Instagram"
+          >
+            <Instagram className="size-4 mr-2" aria-hidden="true" />
+            {SOCIAL_LINKS.instagramHandle}
+          </a>
+        </Button>
         {/* Instagram feed embed placeholder — replace this div with an actual feed embed (e.g. Elfsight, Curator.io) when ready */}
         <div className="mt-8 grid grid-cols-3 sm:grid-cols-6 gap-2 max-w-2xl mx-auto">
           {[
