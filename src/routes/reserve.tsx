@@ -3,6 +3,7 @@ import { useMemo, useState, useEffect, useRef } from "react";
 import { useAuth } from "@/context/AuthContext";
 import { WifiCard } from "@/components/WifiCard";
 import { UpiQrBackup } from "@/components/UpiQrBackup";
+import { FindUsCard } from "@/components/FindUsCard";
 import {
   Check,
   Minus,
@@ -2647,6 +2648,10 @@ function ReservePage() {
                 ? "Confirm & Place Takeaway Order"
                 : "Confirm & Place Delivery Order"}
             </Button>
+          </div>
+
+          <div className="mt-6">
+            <FindUsCard />
           </div>
         </aside>
       </div>
