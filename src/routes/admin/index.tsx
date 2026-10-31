@@ -1229,6 +1229,9 @@ function AdminDashboardPage() {
                             {/* Pre-Order / Total */}
                             <td className="px-5 py-4 whitespace-nowrap">
                               <div className="font-semibold text-white">₹{b.total}</div>
+                              {b.orderType === "TAKEAWAY" && Number(b.packagingCharge) > 0 && (
+                                <div className="text-[11px] text-neutral-400">incl. ₹{Number(b.packagingCharge)} parcel charge</div>
+                              )}
                               <div className="text-[11px] text-neutral-400">
                                 {preOrdered.length > 0 ? `${preOrdered.length} items pre-ordered` : "No pre-order"}
                               </div>

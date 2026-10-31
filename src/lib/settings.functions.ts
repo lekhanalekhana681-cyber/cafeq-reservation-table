@@ -1,6 +1,7 @@
 import { createClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 import { DEFAULT_DELIVERY_FEE, DEFAULT_PACKAGING_CHARGE } from "@/lib/order-types";
+import { CAFE_PAYEE_NAME, CAFE_UPI_ID } from "@/lib/upi";
 import {
   DEFAULT_PREORDER_SETTINGS,
   type PreorderPaymentMode,
@@ -12,13 +13,13 @@ export type CafeSettings = {
   upiPayeeName: string;
   /** Flat delivery fee in ₹ (cafe_settings key: delivery_fee) */
   deliveryFee: number;
-  /** Takeaway packaging charge in ₹ (cafe_settings key: packaging_charge) */
+  /** Takeaway parcel charge in ₹ (cafe_settings key: packaging_charge) */
   packagingCharge: number;
 } & PreorderSettings;
 
 const DEFAULT_SETTINGS: CafeSettings = {
-  upiId: "cafeq@upi",
-  upiPayeeName: "Cafeq",
+  upiId: CAFE_UPI_ID,
+  upiPayeeName: CAFE_PAYEE_NAME,
   deliveryFee: DEFAULT_DELIVERY_FEE,
   packagingCharge: DEFAULT_PACKAGING_CHARGE,
   ...DEFAULT_PREORDER_SETTINGS,

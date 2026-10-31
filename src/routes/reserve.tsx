@@ -4,6 +4,8 @@ import { useAuth } from "@/context/AuthContext";
 import { WifiCard } from "@/components/WifiCard";
 import { UpiQrBackup } from "@/components/UpiQrBackup";
 import { FindUsCard } from "@/components/FindUsCard";
+import { PARCEL_CHARGE } from "@/config/charges";
+import { CAFE_PAYEE_NAME, CAFE_UPI_ID, isValidUtr } from "@/lib/upi";
 import {
   Check,
   Minus,
@@ -221,13 +223,13 @@ type CartItemState = {
 function ReservePage() {
   const { data: settingsData } = useQuery({
     ...settingsQueryOptions,
-    initialData: { upiId: "cafeq@upi", upiPayeeName: "The CAFEQ", deliveryFee: 40, packagingCharge: 0, ...DEFAULT_PREORDER_SETTINGS },
+    initialData: { upiId: CAFE_UPI_ID, upiPayeeName: CAFE_PAYEE_NAME, deliveryFee: 40, packagingCharge: PARCEL_CHARGE, ...DEFAULT_PREORDER_SETTINGS },
   });
   const settings = settingsData ?? {
-    upiId: "cafeq@upi",
-    upiPayeeName: "The CAFEQ",
+    upiId: CAFE_UPI_ID,
+    upiPayeeName: CAFE_PAYEE_NAME,
     deliveryFee: 40,
-    packagingCharge: 0,
+    packagingCharge: PARCEL_CHARGE,
     ...DEFAULT_PREORDER_SETTINGS,
   };
   const search = Route.useSearch();
@@ -925,6 +927,10 @@ function ReservePage() {
   /** "I have paid" on the confirmation page (after the gateway failed): staff verify it. */
   const handleQrClaim = async (utr: string) => {
     if (!code || qrClaim === "sending") return;
+    if (!isValidUtr(utr)) {
+      toast.error("Enter the 12-digit UPI transaction ID (UTR) from your UPI app.");
+      return;
+    }
     setQrClaim("sending");
     try {
       try {
@@ -1169,6 +1175,7 @@ function ReservePage() {
                     <UpiQrBackup
                       amount={Math.round(preorderPay.order?.totalAmountPaise ?? preorderPay.totalPaise) / 100}
                       reference={code}
+                      parcelCharge={packagingCharge}
                       busy={qrClaim === "sending"}
                       onPaid={handleQrClaim}
                     />
@@ -1598,7 +1605,7 @@ function ReservePage() {
 
                 <div className="rounded-xl bg-accent/10 border border-accent/20 p-3 text-xs text-muted-foreground flex items-center justify-between">
                   <span className="flex items-center gap-1.5">
-                    <Package className="size-3.5 text-accent" /> Insulated Eco-Packaging
+                    <Package className="size-3.5 text-accent" /> Parcel Charge (per order)
                   </span>
                   <span className="font-semibold text-foreground">
                     {packagingCharge > 0 ? `₹${packagingCharge}` : "FREE (₹0)"}
@@ -2450,7 +2457,7 @@ function ReservePage() {
                 {packagingCharge > 0 && (
                   <div className="flex justify-between text-muted-foreground pt-1">
                     <span className="flex items-center gap-1">
-                      <Package className="size-3 text-accent" /> Packaging Charge
+                      <Package className="size-3 text-accent" /> Parcel Charge (₹{packagingCharge})
                     </span>
                     <span className="font-medium text-foreground">₹{packagingCharge}</span>
                   </div>
@@ -2484,6 +2491,18 @@ function ReservePage() {
                   {prepayFull ? "Prepayment required for pre-orders" : "Deposit required for pre-orders"}
                 </p>
                 <dl className="space-y-1.5 rounded-xl border border-border bg-secondary/30 p-3">
+                  {packagingCharge > 0 && (
+                    <>
+                      <div className="flex justify-between">
+                        <dt className="text-muted-foreground">Items subtotal</dt>
+                        <dd className="font-medium text-foreground">₹{foodTotal}</dd>
+                      </div>
+                      <div className="flex justify-between">
+                        <dt className="text-muted-foreground">Parcel Charge (₹{packagingCharge})</dt>
+                        <dd className="font-medium text-foreground">₹{packagingCharge}</dd>
+                      </div>
+                    </>
+                  )}
                   <div className="flex justify-between">
                     <dt className="text-muted-foreground">Order total</dt>
                     <dd className="font-medium text-foreground">{formatPaise(estTotalPaise)}</dd>
@@ -2593,6 +2612,7 @@ function ReservePage() {
                               compact
                               amount={totalWithDeposit}
                               reference={draftCode}
+                              parcelCharge={packagingCharge}
                               busy={submitting}
                               onPaid={(utr) => {
                                 qrSubmitRef.current = utr;

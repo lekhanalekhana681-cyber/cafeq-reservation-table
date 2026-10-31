@@ -54,6 +54,7 @@ const MIGRATIONS = [
   "20261101000000_billed_status.sql",
   "20261102000000_online_payment_methods.sql",
   "20261104000000_upi_qr_backup.sql",
+  "20261105000000_parcel_charge_and_upi_verify.sql",
 ];
 
 /** Fake Razorpay gateway: same shape as createRazorpayClient, real HMAC signatures. */
@@ -605,7 +606,7 @@ async function runTests() {
   assert(!!listed && listed.payment_status === "pending_verification" && listed.balance_due_paise > 0, "Shows in Admin › Payments under \"Verify UPI\"");
 
   // Table booking without a deposit, paid by QR (flagged at insert, no server call needed)
-  const tableQr = await placeOrder({ ...istSlot(60), items: "[]", total: 300, payment_method: "upi_prepay", payment_status: "pending_verification" });
+  const tableQr = await placeOrder({ ...istSlot(60), items: "[]", total: 300, payment_method: "upi_prepay", payment_status: "pending_verification", payment_reference: "512345678901" });
   const tableListed = (await service.list({ filter: "verify" })).orders.find((o: any) => o.code === tableQr);
   assert(!!tableListed && tableListed.balance_due_paise === 30000, "Table-only QR payment is listed for staff too (₹300)");
 
@@ -625,6 +626,72 @@ async function runTests() {
     "NOT_PAYABLE",
     "Cancelled order can't be claimed"
   );
+
+  // --------------------------------------------------------------------------
+  console.log("\nSuite 7e: Parcel Charge + UPI QR Confirm / Reject");
+
+  const takeawayRow = { order_type: "TAKEAWAY", table_number: null, pickup_time: "In 45 mins" };
+  await expectError(
+    () => placeOrder({ ...takeawayRow, packaging_charge: 0 }),
+    "charges have changed",
+    "Takeaway without the ₹30 parcel charge is refused"
+  );
+  const takeaway = await placeOrder({ ...takeawayRow, packaging_charge: 30, total: 1 });
+  b = await getBooking(takeaway);
+  assert(Number(b.packaging_charge) === 30, "Takeaway stores the ₹30 parcel charge (flat, per order)");
+  assert(
+    b.total_amount_paise === 51000 && b.total === 510,
+    `Takeaway total priced on the server: ₹360 + ₹120 + ₹30 = ₹510, browser's ₹1 ignored (got ${b.total_amount_paise})`
+  );
+  const dineInCheck = await getBooking(await placeOrder({ ...istSlot(60), items: "[]", total: 200 }));
+  assert(Number(dineInCheck.packaging_charge) === 0 && dineInCheck.total_amount_paise === 20000, "Dine-in / table booking has no parcel charge");
+
+  const utrOrder = await placeOrder({ ...istSlot(60), items: "[]", total: 250, payment_method: "upi_prepay" });
+  await expectError(
+    () => db.rpc("pay_claim_upi_qr", { _code: utrOrder, _phone: "9876543210", _reference: null }),
+    "UTR_REQUIRED",
+    "\"I have paid\" without a UTR is refused"
+  );
+  await expectError(
+    () => db.rpc("pay_claim_upi_qr", { _code: utrOrder, _phone: "9876543210", _reference: "12345" }),
+    "UTR_REQUIRED",
+    "…and a UTR that isn't 12 digits"
+  );
+  await expectError(
+    () => db.rpc("pay_claim_upi_qr", { _code: utrOrder, _phone: "9876543210", _reference: "403829104829" }),
+    "UTR_ALREADY_USED",
+    "A UTR already used on another order is refused"
+  );
+  await expectError(
+    () => placeOrder({ ...istSlot(60), items: "[]", total: 100, payment_method: "upi_prepay", payment_status: "pending_verification" }),
+    "12-digit UPI transaction ID",
+    "The public key can't flag \"I have paid\" without a UTR either"
+  );
+  await expectError(
+    () => asAnon("UPDATE public.bookings SET payment_status = 'paid' WHERE code = $1", [utrOrder]),
+    "PAYMENT_FIELDS_READ_ONLY",
+    "The public key can never mark an order paid"
+  );
+
+  await service.confirmUpiQr({ code: tableQr, actor: "admin:Cashier" });
+  b = await getBooking(tableQr);
+  const qrPayment = (await pg.query<any>("SELECT * FROM public.payments WHERE booking_code = $1", [tableQr])).rows[0];
+  assert(b.payment_state === "PAID" && b.payment_status === "paid" && b.amount_paid_paise === 30000, "Confirm → PAID for the full ₹300");
+  assert(qrPayment?.method === "upi_qr" && qrPayment?.status === "captured" && qrPayment?.collected_by === "admin:Cashier", "Payment recorded as UPI QR, by the staff member");
+  await expectError(() => service.confirmUpiQr({ code: tableQr, actor: "admin:Cashier" }), "no UPI payment waiting", "Confirming twice is refused");
+
+  const toReject = await placeOrder({ payment_method: "upi_prepay" });
+  await db.rpc("pay_claim_upi_qr", { _code: toReject, _phone: "9876543210", _reference: "612345678901" });
+  await service.rejectUpiQr({ code: toReject, actor: "admin:Cashier", reason: "UTR not found" });
+  b = await getBooking(toReject);
+  assert(b.payment_status === "failed" && b.payment_state !== "PAID" && b.amount_paid_paise === 0, "Reject → not paid");
+  assert(b.status === "pending_payment" && b.payment_expires_at !== null, "Rejected pre-order goes back to waiting for payment");
+  const rejectAudit = (await pg.query<any>("SELECT * FROM public.payment_audit_log WHERE booking_code = $1 AND action = 'upi_qr_rejected'", [toReject])).rows[0]
+    ?? (await pg.query<any>("SELECT * FROM public.payment_audit_log WHERE booking_code = $1", [toReject])).rows.find((r: any) => JSON.stringify(r).includes("upi_qr_rejected"));
+  assert(!!rejectAudit && JSON.stringify(rejectAudit).includes("612345678901") && JSON.stringify(rejectAudit).includes("UTR not found"), "Rejection is audited with the UTR and reason");
+  const reclaimed = await db.rpc("pay_claim_upi_qr", { _code: toReject, _phone: "9876543210", _reference: "712345678901" });
+  assert(reclaimed.booking.payment_status === "pending_verification", "After a rejection the customer can submit a new UTR");
+  assert((await service.list({ filter: "all" })).orders.some((o: any) => o.code === takeaway || o.code === toReject), "QR orders listed in Admin › Payments");
 
   // --------------------------------------------------------------------------
   // SUITE 8: HTTP adapters (PostgREST RPC + Razorpay REST) with a mocked fetch

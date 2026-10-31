@@ -9,12 +9,15 @@
  * and are mirrored by the `enforce_order_type_rules` trigger in Supabase.
  */
 
+import { PARCEL_CHARGE } from "@/config/charges";
+
 export const ORDER_TYPE_VALUES = ["DINE_IN", "TAKEAWAY", "DELIVERY"] as const;
 
 export type OrderType = (typeof ORDER_TYPE_VALUES)[number];
 
 export const DEFAULT_DELIVERY_FEE = 40;
-export const DEFAULT_PACKAGING_CHARGE = 0;
+/** Takeaway parcel charge (src/config/charges.ts) */
+export const DEFAULT_PACKAGING_CHARGE = PARCEL_CHARGE;
 
 export interface OrderTypeDetails {
   type: OrderType;

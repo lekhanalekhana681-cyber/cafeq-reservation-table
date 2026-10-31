@@ -23,6 +23,8 @@ async function runTests() {
   // ── TEST 1: Check that 'Lekhana B S' is completely eliminated from source code ──
   console.log("\n[TEST 1] Verifying no hardcoded 'Lekhana' remains in src/...");
   const VISIT_PAGE = path.resolve(process.cwd(), "src", "routes", "visit.tsx");
+  // The cafe's UPI payee name ("LEKHANA B S"), shown under the payment QR
+  const UPI_CONFIG = path.resolve(process.cwd(), "src", "lib", "upi.ts");
   function scanDir(dir: string): string[] {
     const results: string[] = [];
     const list = fs.readdirSync(dir);
@@ -31,8 +33,9 @@ async function runTests() {
       const stat = fs.statSync(fullPath);
       if (stat.isDirectory()) {
         results.push(...scanDir(fullPath));
-      } else if (fullPath === VISIT_PAGE) {
-        // The Visit page names Lekhana as a co-founder: real content, not a hardcoded logged-in user
+      } else if (fullPath === VISIT_PAGE || fullPath === UPI_CONFIG) {
+        // The Visit page names Lekhana as a co-founder and upi.ts holds the UPI payee name:
+        // real content, not a hardcoded logged-in user
         continue;
       } else if (/\.(tsx?|jsx?|json|css|html)$/i.test(file)) {
         const content = fs.readFileSync(fullPath, "utf-8");

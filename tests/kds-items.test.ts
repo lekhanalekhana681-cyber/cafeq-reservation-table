@@ -278,7 +278,8 @@ async function runTests() {
       name: "Meera",
       phone: "+91 99887 76655",
       items: [{ id: "espresso", name: "Espresso", qty: 1, price: 120, prepTimeMinutes: 2, fulfillment: "pre_ordered" }],
-      total: 120,
+      total: 150,
+      packagingCharge: 30,
       orderType: "TAKEAWAY",
     } as any,
   });

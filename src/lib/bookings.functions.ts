@@ -716,6 +716,10 @@ export async function updateBookingPaymentStatus({
 
     if (error) {
       console.error("updateBookingPaymentStatus error:", error);
+      // "I have paid" must not look recorded when the database refused it (e.g. bad UTR)
+      if (status === "pending_verification") {
+        throw new Error(error.code === "23514" ? error.message : "We couldn't record your UPI payment. Please try again.");
+      }
     }
   }
 

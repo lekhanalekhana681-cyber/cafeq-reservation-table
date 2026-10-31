@@ -70,7 +70,8 @@ async function runTests() {
     PAYMENT_OPTIONS,
     isOnlinePaymentMethod,
   } = await import("../src/lib/payment-methods");
-  const { buildUpiPaymentLink, CAFE_UPI_ID } = await import("../src/lib/upi");
+  const { buildUpiPaymentLink, CAFE_UPI_ID, isValidUtr } = await import("../src/lib/upi");
+  const { getOrderCharges } = await import("../src/lib/order-types");
   const { createBooking, getAllBookings } = await import("../src/lib/bookings.functions");
 
   // --------------------------------------------------------------------------
@@ -143,10 +144,10 @@ async function runTests() {
   // --------------------------------------------------------------------------
   console.log("\nSuite 4: UPI QR Backup Link");
 
-  assert(CAFE_UPI_ID === "dummycafe@upi", "Dummy UPI ID until VITE_CAFE_UPI_ID is set");
+  assert(CAFE_UPI_ID === "7349540534@axl", "Cafe UPI ID is 7349540534@axl");
   const link = buildUpiPaymentLink({ amount: 360, reference: "CQ-AB12" });
   assert(
-    link === "upi://pay?pa=dummycafe@upi&pn=Cafe%20Name&am=360.00&cu=INR&tn=CQ-AB12",
+    link === "upi://pay?pa=7349540534@axl&pn=LEKHANA%20B%20S&am=360.00&cu=INR&tn=CQ-AB12",
     `upi://pay link with amount and reservation ID: ${link}`
   );
   assert(buildUpiPaymentLink({ amount: 504.5, reference: "CQ-AB12" }).includes("&am=504.50&"), "Amount follows the order total (₹504.50)");
@@ -155,6 +156,13 @@ async function runTests() {
       "upi://pay?pa=real@okhdfc&pn=Brew%20%26%20Co&am=100.00&cu=INR&tn=CQ%201%26x",
     "Real UPI ID / name can be swapped in; values are URL-encoded"
   );
+  const parcel = getOrderCharges("TAKEAWAY", null).packagingCharge;
+  assert(
+    buildUpiPaymentLink({ amount: 120 + parcel, reference: "CQ-TK01" }).includes("&am=150.00&cu=INR&tn=CQ-TK01"),
+    "Takeaway QR amount includes the ₹30 parcel charge (₹120 + ₹30 = ₹150)"
+  );
+  assert(isValidUtr("412345678901") && isValidUtr("4123 4567 8901"), "12-digit UTR accepted (spaces ignored)");
+  assert(!isValidUtr("") && !isValidUtr("12345") && !isValidUtr("4123456789012") && !isValidUtr("41234567890a"), "Missing / short / long / non-numeric UTR refused");
 
   console.log("\n==================================================");
   console.log(`  Tests Completed: ${testsPassed + testsFailed}`);

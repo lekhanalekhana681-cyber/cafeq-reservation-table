@@ -193,7 +193,8 @@ async function runTests() {
   assert(getOrderCharges("DELIVERY", settings).packagingCharge === 0, "Delivery has no packaging charge");
   assert(getOrderCharges("TAKEAWAY", settings).packagingCharge === 15, "Takeaway packaging charge from settings");
   assert(getOrderCharges("DELIVERY", null).deliveryFee === 40, "Delivery fee falls back to ₹40 default");
-  assert(getOrderCharges("TAKEAWAY", null).packagingCharge === 0, "Packaging charge falls back to ₹0 default");
+  assert(getOrderCharges("TAKEAWAY", null).packagingCharge === 30, "Parcel charge falls back to the ₹30 PARCEL_CHARGE default");
+  assert(getOrderCharges("DINE_IN", null).packagingCharge === 0, "Dine-in never pays the parcel charge");
   assert(getOrderCharges("DELIVERY", { deliveryFee: -5 }).deliveryFee === 40, "Negative delivery fee setting is ignored");
 
   // --------------------------------------------------------------------------
@@ -250,7 +251,12 @@ async function runTests() {
   );
 
   const dineIn = await createBooking(order({ orderType: "dine_in", tableNumber: " T-07 ", pickupTime: "In 30 mins" }));
-  const takeaway = await createBooking(order({ orderType: "TAKEAWAY", pickupTime: "In 45 mins", tableNumber: "T-2" }));
+  await expectRejection(
+    () => createBooking(order({ orderType: "TAKEAWAY", pickupTime: "In 45 mins" })),
+    "charges have changed",
+    "Takeaway order without the ₹30 parcel charge rejected"
+  );
+  const takeaway = await createBooking(order({ orderType: "TAKEAWAY", pickupTime: "In 45 mins", tableNumber: "T-2", packagingCharge: 30 }));
   const delivery = await createBooking(
     order({
       orderType: "DELIVERY",
@@ -272,6 +278,7 @@ async function runTests() {
   const t = byCode(takeaway.code);
   assert(t.orderType === "TAKEAWAY" && t.pickupTime === "In 45 mins", "Takeaway stored with pickup time");
   assert(t.tableNumber === null, "Takeaway: irrelevant table number cleared");
+  assert(t.packagingCharge === 30, "Takeaway stored with the ₹30 parcel charge");
   assert(t.customerName === "Neha Rao" && t.customerPhone === "+91 98765 43210", "Customer name & phone stored");
 
   const dl = byCode(delivery.code);

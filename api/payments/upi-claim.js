@@ -1,5 +1,5 @@
 /**
- * POST /api/payments/upi-claim  { code, phone, reference? }
+ * POST /api/payments/upi-claim  { code, phone, reference }  (reference = 12-digit UPI UTR, required)
  * The customer tapped "I have paid" after scanning the UPI QR (backup when the gateway fails).
  * Marks the order "Pending verification" for staff to confirm in Admin › Payments.
  * Talks to the database only — it must keep working when Razorpay is down or not configured.
