@@ -6,6 +6,7 @@ import {
   Phone,
   Wifi,
   ExternalLink,
+  Navigation,
   ChevronDown,
   ChevronUp,
   UtensilsCrossed,
@@ -29,6 +30,8 @@ import lekhanaImg from "@/assets/lekhana.jpg";
 import chandanaImg from "@/assets/chandana.jpg";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { CafeMap } from "@/components/CafeMap";
+import { CAFE_DIRECTIONS_URL, CAFE_HOURS, CAFE_LOCATION, CAFE_PHONE_HREF } from "@/config/cafe-location";
 import { Label } from "@/components/ui/label";
 
 export const Route = createFileRoute("/visit")({
@@ -36,20 +39,15 @@ export const Route = createFileRoute("/visit")({
 });
 
 // ─── Data ─────────────────────────────────────────────────────────────────────
-const hours = [
-  ["Monday – Thursday", "7:00 – 19:00"],
-  ["Friday", "7:00 – 22:00"],
-  ["Saturday", "8:00 – 22:00"],
-  ["Sunday", "8:00 – 17:00"],
-];
+const hours = CAFE_HOURS;
 
 const notes = [
   {
     icon: MapPin,
-    title: "238/25, Rajmahal Vilas Extension",
-    body: "Old Tumkur Road, Near Sir C V Raman Road, Malleshwaram, Bangalore.",
+    title: CAFE_LOCATION.title,
+    body: CAFE_LOCATION.address,
   },
-  { icon: Phone, title: "+91 7349540534", body: "Call for groups of 9 or more." },
+  { icon: Phone, title: CAFE_LOCATION.phone, body: "Call for groups of 9 or more." },
   { icon: Wifi, title: "Laptops till 11am", body: "After that the tables go to shared seating." },
   { icon: Clock, title: "15-minute hold", body: "Running late? Reply to your booking SMS." },
 ];
@@ -94,7 +92,7 @@ const faqs = [
   },
   {
     q: "Is parking available?",
-    a: "Yes — street parking is available on Rajmahal Vilas Extension. We also recommend Rapido or auto from Malleshwaram or Yeshwantpur metro stations (~5 min).",
+    a: `Yes — street parking is available near the cafe in ${CAFE_LOCATION.area}. We also recommend Rapido or an auto from the nearest metro station.`,
   },
   {
     q: "Are pets allowed?",
@@ -270,10 +268,10 @@ function VisitPage() {
             <Phone className="size-5 text-accent" aria-hidden="true" />
             <p className="mt-3 font-semibold">Phone</p>
             <a
-              href="tel:+917349540534"
+              href={CAFE_PHONE_HREF}
               className="mt-1 block text-xl font-bold hover:text-accent transition-colors"
             >
-              +91 7349540534
+              {CAFE_LOCATION.phone}
             </a>
             <p className="text-xs text-muted-foreground mt-0.5">Tap to call on mobile</p>
           </div>
@@ -297,33 +295,29 @@ function VisitPage() {
         </div>
 
         {/* Map */}
-        <div className="mt-8 rounded-2xl overflow-hidden border border-border shadow-warm">
-          <iframe
-            title="CAFEQ location on Google Maps"
-            src="https://www.google.com/maps/embed?pb=!1m18!1m12!1m3!1d3887.312!2d77.565!3d13.003!2m3!1f0!2f0!3f0!3m2!1i1024!2i768!4f13.1!3m3!1m2!1s0x0%3A0x0!2s238%2F25%2C%20Rajmahal%20Vilas%20Extension%2C%20Malleshwaram%2C%20Bangalore!5e0!3m2!1sen!2sin!4v1000000000"
-            width="100%"
-            height="300"
-            style={{ border: 0 }}
-            allowFullScreen
-            loading="lazy"
-            referrerPolicy="no-referrer-when-downgrade"
-          />
-          <div className="flex items-center justify-between gap-3 px-4 py-3 bg-card border-t border-border/60 text-sm">
-            <div className="flex items-center gap-2 text-muted-foreground">
-              <MapPin className="size-4 shrink-0 text-accent" />
-              <span>238/25, Rajmahal Vilas Extension, Malleshwaram, Bangalore</span>
+        <div className="mt-8 rounded-2xl overflow-hidden border border-border bg-card shadow-warm">
+          <CafeMap />
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 px-4 py-3 border-t border-border/60 text-sm">
+            <div className="flex items-start gap-2 text-muted-foreground">
+              <MapPin className="size-4 shrink-0 mt-0.5 text-accent" aria-hidden="true" />
+              <span>
+                <span className="font-medium text-foreground">{CAFE_LOCATION.name}</span> · {CAFE_LOCATION.address}
+              </span>
             </div>
-            <a
-              href="https://www.google.com/maps/dir/?api=1&destination=238%2F25+Rajmahal+Vilas+Extension+Malleshwaram+Bangalore"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="shrink-0"
-            >
-              <Button size="sm" variant="outline">
-                <ExternalLink className="size-3.5 mr-1.5" />
-                Get Directions
+            <div className="flex gap-2 shrink-0">
+              <Button asChild size="sm" variant="outline">
+                <a href={CAFE_LOCATION.mapsUrl} target="_blank" rel="noopener noreferrer">
+                  <ExternalLink className="size-3.5 mr-1.5" />
+                  Open in Google Maps
+                </a>
               </Button>
-            </a>
+              <Button asChild size="sm">
+                <a href={CAFE_DIRECTIONS_URL} target="_blank" rel="noopener noreferrer">
+                  <Navigation className="size-3.5 mr-1.5" />
+                  Get Directions
+                </a>
+              </Button>
+            </div>
           </div>
         </div>
       </section>
@@ -390,7 +384,7 @@ function VisitPage() {
         </div>
         <div className="flex-1">
           <p className="text-sm text-muted-foreground">
-            "Best latte art in Malleshwaram, highly recommend the outdoor seating."
+            "Best latte art in {CAFE_LOCATION.area}, highly recommend the outdoor seating."
           </p>
           <p className="text-xs text-muted-foreground mt-0.5">— Anonymous ★★★★★</p>
         </div>
@@ -447,7 +441,7 @@ function VisitPage() {
         </div>
         <p className="mt-6 text-sm text-muted-foreground">
           More questions?{" "}
-          <a href="tel:+917349540534" className="text-accent hover:underline">
+          <a href={CAFE_PHONE_HREF} className="text-accent hover:underline">
             Call us
           </a>{" "}
           or{" "}
