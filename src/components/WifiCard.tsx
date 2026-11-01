@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input";
 import {
   buildWifiQrValue,
   fetchWifiAccess,
-  requestWifiSession,
+  startWifiSession,
   WifiApiError,
   type WifiAccess,
 } from "@/lib/wifi";
@@ -29,6 +29,7 @@ export function WifiCard({ code, refreshKey, className = "" }: { code: string; r
   const { user } = useAuth();
   const [access, setAccess] = useState<WifiAccess | null>(null);
   const [problem, setProblem] = useState<"login" | "unavailable" | null>(null);
+  const [problemText, setProblemText] = useState("");
   const [loading, setLoading] = useState(true);
   const [showPassword, setShowPassword] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -44,6 +45,7 @@ export function WifiCard({ code, refreshKey, className = "" }: { code: string; r
     } catch (err) {
       setAccess(null);
       setProblem(err instanceof WifiApiError && err.code === "LOGIN_REQUIRED" ? "login" : "unavailable");
+      setProblemText(err instanceof Error ? err.message : "");
       if (!(err instanceof WifiApiError && err.code === "LOGIN_REQUIRED")) {
         console.warn("[wifi] access check failed:", err instanceof Error ? err.message : err);
       }
@@ -71,21 +73,20 @@ export function WifiCard({ code, refreshKey, className = "" }: { code: string; r
   }, [access, load]);
 
   if (!user) return null;
-  if (access && ["cancelled", "not_dine_in", "not_found"].includes(access.status)) return null;
-  if (loading) return null;
+  if (access && ["cancelled", "not_dine_in"].includes(access.status)) return null;
 
   const unlock = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!confirmPw) return;
     setUnlocking(true);
-    const ok = await requestWifiSession(user.email, confirmPw, user.id);
+    const res = await startWifiSession(user.email, confirmPw, user.id);
     setUnlocking(false);
     setConfirmPw("");
-    if (ok) {
+    if (res.ok) {
       setLoading(true);
       await load();
     } else {
-      toast.error("That password didn't match. Please try again.");
+      toast.error(res.error || "That password didn't match. Please try again.");
     }
   };
 
@@ -107,7 +108,12 @@ export function WifiCard({ code, refreshKey, className = "" }: { code: string; r
   };
 
   const message = (() => {
-    if (problem === "unavailable") return "WiFi details aren't available right now. Please ask our staff at the counter.";
+    if (loading) return "Checking your WiFi access…";
+    if (problem === "unavailable") {
+      return problemText
+        ? `${problemText.replace(/\.?$/, ".")} You can also ask our staff at the counter.`
+        : "WiFi details aren't available right now. Please ask our staff at the counter.";
+    }
     switch (access?.status) {
       case "not_yet":
         return "WiFi details will be available at your reservation time.";
@@ -118,7 +124,9 @@ export function WifiCard({ code, refreshKey, className = "" }: { code: string; r
       case "awaiting_payment":
         return "Complete your payment to unlock the cafe WiFi.";
       case "not_configured":
-        return "WiFi details will be available at your reservation time. If you're here already, please ask our staff.";
+        return "The cafe hasn't added its WiFi details yet. Please ask our staff at the counter.";
+      case "not_found":
+        return "We couldn't find this reservation on your account. Log in with the account you booked with to see the WiFi.";
       default:
         return null;
     }

@@ -41,6 +41,7 @@ export function WifiSettingsPanel({ defaultIdentifier }: { defaultIdentifier?: s
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
+  const [passwordFromEnv, setPasswordFromEnv] = useState(false);
 
   const lock = useCallback((message?: string) => {
     try {
@@ -61,6 +62,7 @@ export function WifiSettingsPanel({ defaultIdentifier }: { defaultIdentifier?: s
       sessionMinutes: s.session_minutes,
     });
     setMeta({ updatedAt: s.updated_at, updatedBy: s.updated_by });
+    setPasswordFromEnv(Boolean(s.password_from_env));
   };
 
   useEffect(() => {
@@ -218,7 +220,11 @@ export function WifiSettingsPanel({ defaultIdentifier }: { defaultIdentifier?: s
                   {showPassword ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
                 </button>
               </div>
-              <p className="text-[11px] text-neutral-500">8–63 characters (WPA/WPA2)</p>
+              <p className="text-[11px] text-neutral-500">
+                {passwordFromEnv
+                  ? "Set on the server (WIFI_PASSWORD) — customers get this password. Change it there."
+                  : "8–63 characters (WPA/WPA2)"}
+              </p>
             </div>
           </div>
 

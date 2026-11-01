@@ -37,6 +37,8 @@ export type WifiSettings = {
   session_minutes: number;
   updated_at: string | null;
   updated_by: string | null;
+  /** The password comes from WIFI_PASSWORD on the server (overrides the saved one) */
+  password_from_env?: boolean;
 };
 
 export class WifiApiError extends Error {
@@ -91,16 +93,25 @@ export function clearWifiSession(): void {
   }
 }
 
-/** Exchanges the customer's password for a server-signed WiFi token. Never throws. */
-export async function requestWifiSession(email: string, password: string, userId: string): Promise<boolean> {
+/** Exchanges the customer's password for a server-signed WiFi token. Never throws; returns the server's reason on failure. */
+export async function startWifiSession(
+  email: string,
+  password: string,
+  userId: string
+): Promise<{ ok: true } | { ok: false; error: string }> {
   try {
     const { token } = await postWifi<{ token: string }>({ action: "session", email, password });
     localStorage.setItem(CUSTOMER_TOKEN_KEY, JSON.stringify({ token, userId } satisfies StoredToken));
-    return true;
+    return { ok: true };
   } catch (err) {
-    console.warn("[wifi] could not start a WiFi session:", err instanceof Error ? err.message : err);
-    return false;
+    const error = err instanceof Error ? err.message : "Couldn't unlock the cafe WiFi.";
+    console.warn("[wifi] could not start a WiFi session:", error);
+    return { ok: false, error };
   }
+}
+
+export async function requestWifiSession(email: string, password: string, userId: string): Promise<boolean> {
+  return (await startWifiSession(email, password, userId)).ok;
 }
 
 /** Access for the given bookings. Throws WifiApiError("…", "LOGIN_REQUIRED") without a valid session. */
