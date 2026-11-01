@@ -50,6 +50,7 @@ const MIGRATIONS = [
   "20261101000000_billed_status.sql",
   "20261102000000_online_payment_methods.sql",
   "20261103000000_wifi_access.sql",
+  "20261106000000_wifi_env_credentials.sql",
 ];
 
 const env = { PAYMENTS_ADMIN_SECRET: "test_admin_secret" } as any;
@@ -267,6 +268,36 @@ async function runTests() {
   assert(communal.features.includes("power") && TABLE_FEATURE_LABELS.power === "Power outlets", "Long Communal Table → \"Power outlets\"");
   const work = tableTypes.filter(isWorkFriendlyTable).map((t) => t.id);
   assert(work.includes("communal") && work.includes("booth") && !work.includes("courtyard"), `Work-friendly filter → ${work.join(", ")}`);
+
+  // --------------------------------------------------------------------------
+  console.log("\nSuite 6: Credentials From the Server Environment (WIFI_PASSWORD)");
+
+  await pg.exec("DELETE FROM public.wifi_settings");
+  const nowCode = await booking({}, 0);
+  a = await check(nowCode);
+  assert(a.status === "not_configured" && !("password" in a), "Root cause reproduced: nothing saved in Admin › WiFi → password never shown");
+
+  const envWifi = createWifiService({ db, env: { ...env, WIFI_SSID: "CafeQ-Guest", WIFI_PASSWORD: "Test@Pass2026" } });
+  const envCheck = async (code: string, token = nehaToken) => (await envWifi.access(token, { codes: [code] })).access[code];
+  a = await envCheck(nowCode);
+  assert(a.status === "available" && a.ssid === "CafeQ-Guest" && a.password === "Test@Pass2026", "WIFI_SSID / WIFI_PASSWORD from .env → network + password Test@Pass2026 shown");
+
+  await wifi.adminSave(adminToken, { settings: { ssid: "CafeQ-Lounge", password: "old-pass-1" } });
+  a = await envCheck(nowCode);
+  assert(a.ssid === "CafeQ-Lounge" && a.password === "Test@Pass2026", "Existing network name kept; WIFI_PASSWORD wins over the saved password");
+  const adminView = (await envWifi.adminGet(adminToken)).settings;
+  assert(adminView.password === "Test@Pass2026" && adminView.password_from_env === true, "Admin › WiFi shows the password customers actually get");
+
+  a = await envCheck(await booking({}, 120));
+  assert(a.status === "not_yet" && !("password" in a), "Still hidden before 15 min ahead of the slot");
+  a = await envCheck(await booking({ status: "pending" }, 0));
+  assert(a.status === "awaiting_confirmation" && !("password" in a), "Still hidden until the reservation is confirmed");
+  a = await envCheck(nowCode, arjunToken);
+  assert(a.status === "not_found" && !("password" in a), "Still hidden from other customers");
+  assert(
+    buildWifiQrValue("CafeQ-Lounge", "Test@Pass2026") === "WIFI:T:WPA;S:CafeQ-Lounge;P:Test@Pass2026;;",
+    "QR payload: WIFI:T:WPA;S:CafeQ-Lounge;P:Test@Pass2026;;"
+  );
 
   console.log("\n==================================================");
   console.log(`  Tests Completed: ${testsPassed + testsFailed}`);
