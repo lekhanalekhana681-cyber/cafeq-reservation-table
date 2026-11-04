@@ -25,8 +25,7 @@ import {
   paymentsAdminApi,
   PAYMENT_STATE_LABELS,
   type PaymentState,
-  type PreorderPaymentMode,
-} from "@/lib/prepayment";
+  type PreorderPaymentMode, paymentStatusLabel } from "@/lib/prepayment";
 import { getCafeSettings } from "@/lib/settings.functions";
 
 const TOKEN_KEY = "cafeq_payments_admin_token";
@@ -73,7 +72,7 @@ type Listing = {
   daily: Array<{ day: string; collected_paise: number; refunded_paise: number; forfeited_paise: number }>;
 };
 
-type Filter = "all" | "paid" | "pending" | "verify" | "refunded" | "forfeited";
+type Filter = "all" | "paid" | "pending" | "failed" | "verify" | "refunded" | "forfeited";
 
 const STATE_CLASS: Record<PaymentState, string> = {
   UNPAID: "bg-neutral-800 text-neutral-400 border-neutral-700",
@@ -361,7 +360,7 @@ export function PaymentsPanel({ defaultIdentifier }: { defaultIdentifier?: strin
       <section className="rounded-2xl border border-neutral-800 bg-neutral-900/60 p-4">
         <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
           <div className="flex flex-wrap gap-1.5">
-            {(["all", "paid", "pending", "verify", "refunded", "forfeited"] as Filter[]).map((f) => (
+            {(["all", "paid", "pending", "failed", "verify", "refunded", "forfeited"] as Filter[]).map((f) => (
               <button
                 key={f}
                 type="button"
@@ -406,6 +405,10 @@ export function PaymentsPanel({ defaultIdentifier }: { defaultIdentifier?: strin
                         </Badge>
                         <Badge variant="outline" className="text-[10px] border-neutral-700 text-neutral-400 capitalize">
                           {o.status.replace("_", " ")}
+                        </Badge>
+                        <Badge variant="outline" className="text-[10px] border-neutral-700 text-neutral-300">
+                          Payment: {paymentStatusLabel(o.payment_state, o.payment_status)}
+                          {o.payment_method === "pay_on_arrival" && " · at cafe"}
                         </Badge>
                         {o.payment_status === "pending_verification" && (
                           <Badge variant="outline" className="text-[10px] bg-amber-500/15 text-amber-300 border-amber-500/40">

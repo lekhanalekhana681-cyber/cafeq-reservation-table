@@ -1,15 +1,16 @@
 /**
  * Cafe UPI details for the "Pay via UPI QR" backup (when the payment gateway fails or the
  * customer prefers to scan). Set in .env (a UPI ID is public, so it's safe in the browser):
- *   CAFE_UPI_ID=7349540534@axl
- *   CAFE_PAYEE_NAME=LEKHANA B S
- * vite.config.ts exposes exactly these two names to the browser.
+ *   CAFE_UPI_ID=yourcafe@upi
+ *   CAFE_PAYEE_NAME=Your Name
+ * vite.config.ts exposes exactly these two names to the browser. Nothing is hard-coded here:
+ * without them the QR section says UPI isn't set up and offers the other options.
  */
 
 const env = (import.meta as any).env ?? {};
 
-export const CAFE_UPI_ID: string = env.CAFE_UPI_ID || env.VITE_CAFE_UPI_ID || "7349540534@axl";
-export const CAFE_PAYEE_NAME: string = env.CAFE_PAYEE_NAME || env.VITE_CAFE_UPI_NAME || "LEKHANA B S";
+export const CAFE_UPI_ID: string = env.CAFE_UPI_ID || env.VITE_CAFE_UPI_ID || "";
+export const CAFE_PAYEE_NAME: string = env.CAFE_PAYEE_NAME || env.VITE_CAFE_UPI_NAME || "";
 /** @deprecated use CAFE_PAYEE_NAME */
 export const CAFE_UPI_NAME = CAFE_PAYEE_NAME;
 

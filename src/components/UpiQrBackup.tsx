@@ -50,6 +50,14 @@ export function UpiQrBackup({
   const utrValid = isValidUtr(utr);
   const showUtrError = touched && !utrValid;
 
+  if (!CAFE_UPI_ID) {
+    return (
+      <p role="status" className="rounded-xl border border-accent/30 bg-accent/5 p-3.5 text-left text-xs text-muted-foreground">
+        UPI QR isn't set up yet. Please choose Pay at cafe, or ask our staff.
+      </p>
+    );
+  }
+
   return (
     <section aria-label="Pay via UPI QR" className="rounded-xl border border-accent/30 bg-accent/5 p-3.5 text-left">
       <div className="flex items-center gap-1.5">

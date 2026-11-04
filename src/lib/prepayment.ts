@@ -216,6 +216,25 @@ async function postJson<T>(path: string, body: unknown, token?: string): Promise
   return data as T;
 }
 
+/** The customer's fallback when online payment fails: pay by cash or card at the cafe. */
+export const chooseCafePayment = (code: string, phone: string) =>
+  postJson("/api/payments/pay-at-cafe", { code, phone });
+
+/** Stores a failed checkout on the order for Admin. Never blocks the customer. */
+export function reportPaymentFailed(code: string, phone: string, reason: string): void {
+  postJson("/api/payments/report-failed", { code, phone, reason }).catch((err) =>
+    console.warn("[payments] could not record the failed payment:", err instanceof Error ? err.message : err)
+  );
+}
+
+/** Pending / Paid / Failed, as shown in Admin. */
+export function paymentStatusLabel(paymentState?: string | null, paymentStatus?: string | null): "Paid" | "Failed" | "Refunded" | "Pending" {
+  if (paymentState === "REFUNDED" || paymentState === "PARTIALLY_REFUNDED" || paymentStatus === "refunded") return "Refunded";
+  if (paymentState === "PAID" || paymentStatus === "paid") return "Paid";
+  if (paymentStatus === "failed") return "Failed";
+  return "Pending";
+}
+
 /** Which Razorpay Checkout screen to open: everything ("razorpay"), or just UPI / cards / netbanking. */
 export type CheckoutMethod = "razorpay" | "upi" | "card" | "netbanking";
 

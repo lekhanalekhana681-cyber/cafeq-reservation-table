@@ -50,6 +50,15 @@ async function askAssistant(message: string): Promise<ChatAnswer> {
 }
 
 export function ReservationChatbot() {
+  // The floating button must not cover the footer when the page is scrolled to the end
+  useEffect(() => {
+    const previous = document.body.style.paddingBottom;
+    document.body.style.paddingBottom = "5rem";
+    return () => {
+      document.body.style.paddingBottom = previous;
+    };
+  }, []);
+
   const [open, setOpen] = useState(false);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);

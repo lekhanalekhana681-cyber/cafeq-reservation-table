@@ -63,7 +63,7 @@ import {
 import { formatItemProgress, ITEM_STATUS_LABELS } from "@/lib/order-items";
 import { PaymentsPanel } from "@/components/admin/PaymentsPanel";
 import { WifiSettingsPanel } from "@/components/admin/WifiSettingsPanel";
-import { formatPaise, PAYMENT_STATE_LABELS } from "@/lib/prepayment";
+import { formatPaise, PAYMENT_STATE_LABELS, paymentStatusLabel } from "@/lib/prepayment";
 import { toast } from "sonner";
 import { getDeliveryLogs, type DeliveryLogRecord } from "@/lib/notifications";
 import {
@@ -1269,6 +1269,11 @@ function AdminDashboardPage() {
                                   </Badge>
                                 );
                               })()}
+                              {b.total > 0 && (
+                                <div className="mt-1 text-[10px] text-neutral-300">
+                                  Payment: {paymentStatusLabel(b.paymentState, b.paymentStatus)}
+                                </div>
+                              )}
                               {b.paymentRequired && b.paymentState && (
                                 <div className="mt-1 text-[10px] text-neutral-400">
                                   {PAYMENT_STATE_LABELS[b.paymentState]}

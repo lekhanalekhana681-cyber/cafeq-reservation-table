@@ -8,14 +8,12 @@ import { createClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 import type { BookingInput, OrderItem } from "@/lib/bookings.functions";
 import { getOrderTypeDetails } from "@/lib/order-types";
+import { computeOrderTaxes, TAX_RATES } from "@/config/charges";
 
 // ─── Bill Tax Configuration ───────────────────────────────────────────────────
 
 /** GST on restaurant bills. Change rates here; the bill and its labels follow. */
-export const BILL_TAX_RATES = {
-  cgst: 0.025,
-  sgst: 0.025,
-} as const;
+export const BILL_TAX_RATES = TAX_RATES;
 
 const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
 const pct = (rate: number) => `${round2(rate * 100)}%`;
@@ -25,9 +23,8 @@ export type BillTotals = { subtotal: number; cgst: number; sgst: number; taxAmou
 /** Subtotal = Σ price × qty; CGST/SGST on the subtotal; Grand Total = Subtotal + CGST + SGST (2 decimals). */
 export function computeBillTotals(items: Array<Pick<OrderItem, "price" | "qty">>): BillTotals {
   const subtotal = round2(items.reduce((sum, i) => sum + i.price * i.qty, 0));
-  const cgst = round2(subtotal * BILL_TAX_RATES.cgst);
-  const sgst = round2(subtotal * BILL_TAX_RATES.sgst);
-  return { subtotal, cgst, sgst, taxAmount: round2(cgst + sgst), grandTotal: round2(subtotal + cgst + sgst) };
+  const { cgst, sgst, taxAmount } = computeOrderTaxes(subtotal);
+  return { subtotal, cgst, sgst, taxAmount, grandTotal: round2(subtotal + taxAmount) };
 }
 
 /** Bills are stored as receipts with this number prefix (payment receipts use CQ-RCP-). */
@@ -58,6 +55,7 @@ export function generateBill(b: BookingInput): ReceiptData {
   const type = getOrderTypeDetails(b.orderType);
   // Takeaway parcel charge (flat, no GST), as stored on the order
   const parcelCharge = type.type === "TAKEAWAY" ? round2(Math.max(0, Number(b.packagingCharge ?? 0))) : 0;
+  const deliveryFee = type.type === "DELIVERY" ? round2(Math.max(0, Number(b.deliveryFee ?? 0))) : 0;
   const where =
     type.type === "DINE_IN"
       ? `Dine-in · Table ${b.tableNumber || b.seating || "-"}`
@@ -87,7 +85,8 @@ export function generateBill(b: BookingInput): ReceiptData {
     taxAmount: totals.taxAmount,
     depositAmount: 0,
     parcelCharge,
-    total: round2(totals.grandTotal + parcelCharge),
+    deliveryFee,
+    total: round2(totals.grandTotal + parcelCharge + deliveryFee),
     totalLabel: "GRAND TOTAL",
     createdAt: new Date().toISOString(),
   };
@@ -115,6 +114,8 @@ export interface ReceiptData {
   depositAmount: number;
   /** Takeaway parcel charge (₹), shown as its own line */
   parcelCharge?: number;
+  /** Delivery fee (₹), shown as its own line */
+  deliveryFee?: number;
   total: number;
   /** Label for the final line; defaults to "TOTAL PAID" (payment receipts). */
   totalLabel?: string;
@@ -295,6 +296,12 @@ export function generateReceiptPdf(data: ReceiptData): jsPDF {
     y += 5;
     doc.text("Parcel Charge:", colLabel, y);
     doc.text(`INR ${data.parcelCharge!.toFixed(2)}`, colVal, y, { align: "right" });
+  }
+
+  if ((data.deliveryFee ?? 0) > 0) {
+    y += 5;
+    doc.text("Delivery Fee:", colLabel, y);
+    doc.text(`INR ${data.deliveryFee!.toFixed(2)}`, colVal, y, { align: "right" });
   }
 
   if (data.depositAmount > 0) {
