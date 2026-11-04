@@ -33,10 +33,8 @@ import {
 import { getKitchenSession } from "@/lib/auth";
 import type { PaymentState } from "@/lib/prepayment";
 import {
-  getAllowedPaymentMethods,
   isOnlinePaymentMethod,
-  orderHasPreOrder,
-  PAYMENT_METHODS,
+  orderHasPreOrder,
   type PaymentMethodId,
 } from "@/lib/payment-methods";
 
@@ -95,7 +93,7 @@ const bookingSchema = z.object({
   accessibility: z.array(z.string()).max(10).default([]),
   windowPriority: z.boolean().default(false),
   items: z.array(orderItemSchema).max(50).default([]),
-  total: z.number().int().min(0).default(0),
+  total: z.number().min(0).default(0),
   paymentMethod: z.enum(["pay_on_arrival", "upi_prepay", "online_razorpay", "upi_razorpay"]).default("pay_on_arrival"),
   paymentStatus: z.enum(["pending_cash", "pending_qr", "pending_online", "pending_verification", "paid", "failed", "refunded"]).default("pending_cash"),
   paymentReference: z.string().optional().nullable(),
@@ -417,18 +415,9 @@ export async function createBooking({ data }: { data: BookingInput }) {
   const validated = bookingSchema.parse(data);
   const supabase = getPublicClient();
 
-  // Food pre-orders are paid online only (Razorpay or UPI) — never cash.
-  // The database enforces the same rule (check_payment_method_rules).
-  const hasPreOrder = orderHasPreOrder(validated.items);
-  if (hasPreOrder && !(data as Partial<BookingInput>).paymentMethod) {
+  // A food pre-order with no method chosen defaults to online; Pay at cafe is allowed on any order.
+  if (orderHasPreOrder(validated.items) && !(data as Partial<BookingInput>).paymentMethod) {
     validated.paymentMethod = "online_razorpay";
-  }
-  if (hasPreOrder && !getAllowedPaymentMethods(true).includes(validated.paymentMethod)) {
-    throw new Error(
-      PAYMENT_METHODS[validated.paymentMethod].cash
-        ? "Cash payment is not available for food pre-orders. Please pay online with Razorpay or UPI."
-        : "Food pre-orders must be paid online with Razorpay or UPI."
-    );
   }
   if (isOnlinePaymentMethod(validated.paymentMethod) && validated.paymentStatus !== "paid") {
     validated.paymentStatus = "pending_online";

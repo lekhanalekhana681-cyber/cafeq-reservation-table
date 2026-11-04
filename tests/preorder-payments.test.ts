@@ -55,6 +55,7 @@ const MIGRATIONS = [
   "20261102000000_online_payment_methods.sql",
   "20261104000000_upi_qr_backup.sql",
   "20261105000000_parcel_charge_and_upi_verify.sql",
+  "20261107000000_pay_at_cafe_and_gst.sql",
 ];
 
 /** Fake Razorpay gateway: same shape as createRazorpayClient, real HMAC signatures. */
@@ -220,11 +221,11 @@ async function runTests() {
 
   const code1 = await placeOrder();
   let b = await getBooking(code1);
-  // 2 × ₹180 + 1 × ₹120 (119.6 rounded) = ₹480 ; client sent price 1 and total 1
-  assert(b.total_amount_paise === 48000, `Total computed from DB prices, client prices ignored (${b.total_amount_paise} paise)`);
-  assert(b.deposit_due_paise === 14400, `30% deposit = ₹144 (${b.deposit_due_paise} paise)`);
+  // 2 × ₹180 + 1 × ₹120 (119.6 rounded) = ₹480 + CGST ₹12 + SGST ₹12 = ₹504; client sent price 1 and total 1
+  assert(b.total_amount_paise === 50400, `Total with GST computed from DB prices, client prices ignored (${b.total_amount_paise} paise)`);
+  assert(b.deposit_due_paise === 15100, `30% deposit = ₹151 (${b.deposit_due_paise} paise)`);
   assert(b.status === "pending_payment" && b.payment_state === "PENDING" && b.payment_required, "Pre-order starts PENDING_PAYMENT");
-  assert(b.balance_due_paise === 48000 && b.payment_expires_at !== null, "Balance due tracked; 15-minute expiry set");
+  assert(b.balance_due_paise === 50400 && b.payment_expires_at !== null, "Balance due tracked; 15-minute expiry set");
 
   const walkIn = await placeOrder({ ...istSlot(-5) });
   b = await getBooking(walkIn);
@@ -232,7 +233,7 @@ async function runTests() {
 
   const latte = await placeOrder({ items: JSON.stringify([{ id: "x", name: "Cafe Latte", qty: 1, fulfillment: "pre_ordered" }]) });
   b = await getBooking(latte);
-  assert(b.deposit_due_paise === 5400, `₹180 order → 30% = ₹54 deposit (${b.deposit_due_paise} paise)`);
+  assert(b.deposit_due_paise === 5700, `₹180 order + GST = ₹189 → 30% = ₹57 deposit (${b.deposit_due_paise} paise)`);
   const fries = await placeOrder({ items: JSON.stringify([{ id: "x", name: "French Fries", qty: 1, fulfillment: "pre_ordered" }]) });
   b = await getBooking(fries);
   assert(b.deposit_due_paise === 5000, `₹120 order → 30% = ₹36, minimum ₹50 applies (${b.deposit_due_paise} paise)`);
@@ -249,7 +250,7 @@ async function runTests() {
   console.log("\nSuite 2: Successful Deposit via Checkout");
 
   const checkout = await service.createOrder({ code: code1 });
-  assert(checkout.amountPaise === 14400 && checkout.keyId === "rzp_test_fake", "Razorpay order created for the server-computed deposit");
+  assert(checkout.amountPaise === 15100 && checkout.keyId === "rzp_test_fake", "Razorpay order created for the server-computed deposit");
   const again = await service.createOrder({ code: code1 });
   assert(again.razorpayOrderId === checkout.razorpayOrderId && rzp.orders.size === 1, "Double click on Pay reuses the same Razorpay order");
 
@@ -269,15 +270,15 @@ async function runTests() {
     b.status === "confirmed" && b.kitchen_status === "new" && b.payment_state === "PARTIALLY_PAID",
     "Verified deposit → order confirmed (on the KDS), PARTIALLY_PAID"
   );
-  assert(b.amount_paid_paise === 14400 && b.balance_due_paise === 33600, "Paid ₹144, balance ₹336 due at the cafe");
+  assert(b.amount_paid_paise === 15100 && b.balance_due_paise === 35300, "Paid ₹151, balance ₹353 due at the cafe");
   assert(verified.receipt.paymentId === paid.razorpay_payment_id, "Receipt returned with the payment id");
 
   const replay = await service.verify({ code: code1, ...paid });
   b = await getBooking(code1);
-  assert(replay.order.amountPaidPaise === 14400 && b.amount_paid_paise === 14400, "Verifying the same payment twice does not double-count");
-  const dupWebhook = await webhook("payment.captured", { id: paid.razorpay_payment_id, order_id: checkout.razorpayOrderId, amount: 14400, method: "upi" });
+  assert(replay.order.amountPaidPaise === 15100 && b.amount_paid_paise === 15100, "Verifying the same payment twice does not double-count");
+  const dupWebhook = await webhook("payment.captured", { id: paid.razorpay_payment_id, order_id: checkout.razorpayOrderId, amount: 15100, method: "upi" });
   b = await getBooking(code1);
-  assert(b.amount_paid_paise === 14400 && !dupWebhook.duplicate, "Webhook after verify is processed idempotently (no double credit)");
+  assert(b.amount_paid_paise === 15100 && !dupWebhook.duplicate, "Webhook after verify is processed idempotently (no double credit)");
 
   // --------------------------------------------------------------------------
   // SUITE 3: Webhook path & failures
@@ -339,7 +340,7 @@ async function runTests() {
   const early = await service.cancelByCustomer({ code: code1, phone: "98765 43210" });
   b = await getBooking(code1);
   assert(early.action === "refund" && b.status === "cancelled" && b.payment_state === "REFUNDED", "Cancel 2h before arrival (before 30-min cutoff) → REFUNDED");
-  assert(rzp.refunds.some((r) => r.paymentId === paid.razorpay_payment_id && r.amount === 14400), "Razorpay refund issued for the full deposit");
+  assert(rzp.refunds.some((r) => r.paymentId === paid.razorpay_payment_id && r.amount === 15100), "Razorpay refund issued for the full deposit");
   assert(notifications.some((x) => x.code === code1 && x.event === "refunded"), "Customer notified of the refund");
 
   const soon = await placeOrder({ ...istSlot(20) });
@@ -519,11 +520,13 @@ async function runTests() {
   // --------------------------------------------------------------------------
   console.log("\nSuite 7c: Pre-order Payment Methods & Full Online Payment");
 
-  await expectError(
-    () => placeOrder({ ...istSlot(-5), payment_method: "pay_on_arrival" }),
-    "Cash payment is not available for food pre-orders",
-    "Food pre-order with cash is rejected by the database (check_violation → HTTP 400)"
+  const cafePre = await placeOrder({ payment_method: "pay_on_arrival", total: 1 });
+  b = await getBooking(cafePre);
+  assert(
+    !b.payment_required && b.status === "pending" && b.payment_method === "pay_on_arrival" && b.payment_status === "pending_cash",
+    "Food pre-order with Pay at cafe is placed, not held for a deposit"
   );
+  assert(b.total_amount_paise === 50400 && Number(b.total) === 504, "…and priced on the server with GST (browser's ₹1 ignored)");
   const qrWalkIn = await placeOrder({ ...istSlot(-5), payment_method: "upi_prepay" });
   b = await getBooking(qrWalkIn);
   assert(b.payment_method === "upi_prepay", "Food pre-order may use the UPI QR backup (it isn't cash)");
@@ -533,11 +536,9 @@ async function runTests() {
   const defaulted = await placeOrder({ ...istSlot(-5) });
   b = await getBooking(defaulted);
   assert(b.payment_method === "online_razorpay", "Food pre-order without a method defaults to Razorpay");
-  await expectError(
-    () => asAnon("UPDATE public.bookings SET payment_method = 'pay_on_arrival' WHERE code = $1", [defaulted]),
-    "Cash payment is not available",
-    "Switching a pre-order to cash afterwards is rejected"
-  );
+  await asAnon("UPDATE public.bookings SET payment_method = 'pay_on_arrival' WHERE code = $1", [defaulted]);
+  b = await getBooking(defaulted);
+  assert(b.payment_method === "pay_on_arrival", "An order not held for a deposit can switch to Pay at cafe");
 
   // Walk-in dine-in with food (no deposit rule) paying the fullOrder order online with UPI
   const fullOrder = await placeOrder({ ...istSlot(-5), payment_method: "upi_razorpay" });
@@ -547,13 +548,13 @@ async function runTests() {
     "create-order with a cash method → 400"
   );
   const fullCo = await service.createOrder({ code: fullOrder, method: "upi" });
-  assert(fullCo.amountPaise === 48000 && fullCo.kind === "full" && fullCo.method === "upi", `Full payment priced by the server from the menu: ${fullCo.amountPaise} paise (client sent ₹1)`);
+  assert(fullCo.amountPaise === 50400 && fullCo.kind === "full" && fullCo.method === "upi", `Full payment priced by the server from the menu: ${fullCo.amountPaise} paise (client sent ₹1)`);
   const receipt = rzp.orders.get(fullCo.razorpayOrderId)?.receipt as string;
   assert(typeof receipt === "string" && receipt.startsWith(`${fullOrder}-`) && receipt.length <= 40, `Razorpay order has a unique receipt (${receipt})`);
   const fullPaid = await service.verify({ code: fullOrder, ...rzp.pay(fullCo.razorpayOrderId) });
   b = await getBooking(fullOrder);
   assert(
-    b.payment_state === "PAID" && b.payment_status === "paid" && b.amount_paid_paise === 48000 && fullPaid.receipt.amountPaise === 48000,
+    b.payment_state === "PAID" && b.payment_status === "paid" && b.amount_paid_paise === 50400 && fullPaid.receipt.amountPaise === 50400,
     "Verified signature → order marked PAID with a receipt"
   );
   assert(b.status === "pending", "Payment doesn't skip the admin's Confirm step");
@@ -640,8 +641,8 @@ async function runTests() {
   b = await getBooking(takeaway);
   assert(Number(b.packaging_charge) === 30, "Takeaway stores the ₹30 parcel charge (flat, per order)");
   assert(
-    b.total_amount_paise === 51000 && b.total === 510,
-    `Takeaway total priced on the server: ₹360 + ₹120 + ₹30 = ₹510, browser's ₹1 ignored (got ${b.total_amount_paise})`
+    b.total_amount_paise === 53400 && Number(b.total) === 534,
+    `Takeaway total priced on the server: ₹480 + ₹24 GST + ₹30 parcel = ₹534, browser's ₹1 ignored (got ${b.total_amount_paise})`
   );
   const dineInCheck = await getBooking(await placeOrder({ ...istSlot(60), items: "[]", total: 200 }));
   assert(Number(dineInCheck.packaging_charge) === 0 && dineInCheck.total_amount_paise === 20000, "Dine-in / table booking has no parcel charge");
@@ -692,6 +693,63 @@ async function runTests() {
   const reclaimed = await db.rpc("pay_claim_upi_qr", { _code: toReject, _phone: "9876543210", _reference: "712345678901" });
   assert(reclaimed.booking.payment_status === "pending_verification", "After a rejection the customer can submit a new UTR");
   assert((await service.list({ filter: "all" })).orders.some((o: any) => o.code === takeaway || o.code === toReject), "QR orders listed in Admin › Payments");
+
+  // --------------------------------------------------------------------------
+  console.log("\nSuite 7f: Pay at Cafe Fallback, GST, Failed Payments");
+
+  const gstRows = await pg.query<{ r: string }>("SELECT public.order_gst_paise(12500) AS r");
+  assert(Number(gstRows.rows[0].r) === 626, "₹125 → CGST ₹3.13 + SGST ₹3.13, the same rounding as the bill");
+
+  // Gateway down on a held pre-order: the customer falls back to Pay at cafe
+  const heldCafe = await placeOrder();
+  b = await getBooking(heldCafe);
+  assert(b.status === "pending_payment" && b.payment_required, "Pre-order held for its deposit");
+  await expectError(
+    () => asAnon("SELECT public.pay_choose_at_cafe($1, $2)", [heldCafe, "9876543210"]),
+    "permission denied",
+    "The public key can't call the switch directly (server only)"
+  );
+  await expectError(
+    () => db.rpc("pay_choose_at_cafe", { _code: heldCafe, _phone: "9000011111" }),
+    "PHONE_MISMATCH",
+    "Switch with someone else's phone number is refused"
+  );
+  await db.rpc("pay_choose_at_cafe", { _code: heldCafe, _phone: "+91 98765 43210" });
+  b = await getBooking(heldCafe);
+  assert(
+    b.status === "pending" && !b.payment_required && b.payment_method === "pay_on_arrival" && b.payment_state === "UNPAID" && b.payment_expires_at === null,
+    "Hold released: order placed as Pay at cafe, never marked paid, no 15-minute expiry"
+  );
+  assert(b.balance_due_paise === 50400 && b.deposit_due_paise === 0, "Full ₹504 is due at the cafe");
+  assert((await service.list({ filter: "pending" })).orders.some((o: any) => o.code === heldCafe), "Listed as pending in Admin › Payments");
+  await pg.query("UPDATE public.bookings SET status = 'confirmed' WHERE code = $1", [heldCafe]);
+  await service.collectBalance({ code: heldCafe, method: "cash", actor: "admin:Cashier" });
+  b = await getBooking(heldCafe);
+  assert(b.payment_state === "PAID" && b.payment_status === "paid", "Staff collect at the cafe → Paid");
+  await expectError(
+    () => db.rpc("pay_choose_at_cafe", { _code: heldCafe, _phone: "9876543210" }),
+    "ORDER_ALREADY_PAID",
+    "A paid order can't be switched"
+  );
+
+  // Failed online payment is stored, shown to Admin, and replaced by a later success
+  const failing = await placeOrder({ ...istSlot(-5), payment_method: "upi_razorpay" });
+  await expectError(
+    () => db.rpc("pay_report_failed", { _code: failing, _phone: "9000011111", _reason: "x" }),
+    "PHONE_MISMATCH",
+    "Failure report with someone else's phone number is refused"
+  );
+  await db.rpc("pay_report_failed", { _code: failing, _phone: "9876543210", _reason: "Payment declined" });
+  b = await getBooking(failing);
+  assert(b.payment_status === "failed" && b.payment_state !== "PAID", "Failed checkout → status Failed, not paid");
+  assert((await service.list({ filter: "failed" })).orders.some((o: any) => o.code === failing), "Listed under Failed in Admin › Payments");
+  const retryCo = await service.createOrder({ code: failing, method: "upi" });
+  await service.verify({ code: failing, ...rzp.pay(retryCo.razorpayOrderId) });
+  b = await getBooking(failing);
+  assert(b.payment_status === "paid" && b.payment_state === "PAID", "Retry succeeds with a verified signature → Paid");
+  await db.rpc("pay_report_failed", { _code: failing, _phone: "9876543210", _reason: "late" });
+  b = await getBooking(failing);
+  assert(b.payment_status === "paid", "A late failure report can't undo a paid order");
 
   // --------------------------------------------------------------------------
   // SUITE 8: HTTP adapters (PostgREST RPC + Razorpay REST) with a mocked fetch

@@ -4,7 +4,7 @@ import { useAuth } from "@/context/AuthContext";
 import { WifiCard } from "@/components/WifiCard";
 import { UpiQrBackup } from "@/components/UpiQrBackup";
 import { FindUsCard } from "@/components/FindUsCard";
-import { PARCEL_CHARGE } from "@/config/charges";
+import { computeOrderTaxes, PARCEL_CHARGE, TAX_RATES } from "@/config/charges";
 import { CAFE_PAYEE_NAME, CAFE_UPI_ID, isValidUtr } from "@/lib/upi";
 import {
   Check,
@@ -79,7 +79,9 @@ import {
   isPreorder,
   istToday,
   payOnline,
+  chooseCafePayment,
   claimUpiQrPayment,
+  reportPaymentFailed,
   type CheckoutMethod,
   PAYMENT_WINDOW_MINUTES,
   refundCutoffMs,
@@ -121,9 +123,7 @@ import {
   getAllowedPaymentMethods,
   getPaymentOptions,
   isOnlinePaymentMethod,
-  orderHasPreOrder,
   PAYMENT_OPTIONS,
-  resolvePaymentOption,
   type PaymentMethodId,
   type PaymentOptionId,
 } from "@/lib/payment-methods";
@@ -435,6 +435,7 @@ function ReservePage() {
   const [qrClaim, setQrClaim] = useState<"idle" | "sending" | "submitted">("idle");
   /** Set by "I have paid" just before submitting the form: the UTR the customer typed (may be "") */
   const qrSubmitRef = useRef<string | null>(null);
+  const [switchingToCafe, setSwitchingToCafe] = useState(false);
   const formRef = useRef<HTMLFormElement>(null);
   const [code, setCode] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -559,22 +560,12 @@ function ReservePage() {
   const prepayActive =
     Boolean(getPublicClient()) &&
     settings.preorderPaymentMode !== "NONE" &&
+    !PAYMENT_OPTIONS[paymentOption].cash &&
     isPreorder({ orderType, date, time, pickupTime, items });
   const prepayFull = settings.preorderPaymentMode === "FULL";
 
-  // Payment options follow the cart: food pre-order → UPI / Cards / Netbanking; table only → + cash
-  const hasFoodPreOrder = orderHasPreOrder(items);
-  const allowedPaymentMethods = getAllowedPaymentMethods(hasFoodPreOrder);
-  const paymentOptions = getPaymentOptions(hasFoodPreOrder);
-  useEffect(() => {
-    const next = resolvePaymentOption(paymentOption, hasFoodPreOrder);
-    if (next !== paymentOption) {
-      setPaymentOption(next);
-      if (PAYMENT_OPTIONS[paymentOption].cash) {
-        toast.info("Food pre-orders are paid online, so we switched your payment to UPI.");
-      }
-    }
-  }, [hasFoodPreOrder, paymentOption]);
+  const allowedPaymentMethods = getAllowedPaymentMethods();
+  const paymentOptions = getPaymentOptions();
 
   // Load Razorpay Checkout early so the Pay button opens instantly
   useEffect(() => {
@@ -584,9 +575,10 @@ function ReservePage() {
   // The old fixed table deposit is replaced by the pre-order deposit
   const depositAmount =
     !prepayActive && orderType === "DINE_IN" && slotEvaluation.depositRequired ? slotEvaluation.depositAmount : 0;
-  const totalWithDeposit = foodTotal + deliveryFee + packagingCharge + depositAmount;
-
-  const estTotalPaise = (foodTotal + deliveryFee + packagingCharge) * 100;
+  // CGST + SGST on the items, the same as the bill; the server computes the amount actually charged
+  const { cgst, sgst, taxAmount } = computeOrderTaxes(foodTotal);
+  const estTotalPaise = Math.round((foodTotal + taxAmount + deliveryFee + packagingCharge) * 100);
+  const totalWithDeposit = (estTotalPaise + depositAmount * 100) / 100;
   const estDuePaise = prepayActive ? computeDuePaise(estTotalPaise, settings) : 0;
   const estCutoffAt = prepayActive
     ? refundCutoffMs(estimateScheduledAt({ orderType, date, time, pickupTime }), settings.refundCutoffMinutes)
@@ -720,14 +712,17 @@ function ReservePage() {
 
     const method: PaymentMethodId = viaQr ? "upi_prepay" : paymentMethod;
     if (!allowedPaymentMethods.includes(method)) {
-      toast.error("Food pre-orders are paid online — please choose UPI, a card or netbanking.");
+      toast.error("Please choose a payment method.");
       return;
     }
     const payingOnlineNow = isOnlinePaymentMethod(method);
     if (payingOnlineNow && !getPublicClient()) {
-      // Online payments need the database + /api functions (deployed site or `vercel dev`)
-      toast.error("Online payment isn't available on this server yet. Please contact the cafe.");
+      // Online payments need the database + /api functions (deployed site or `vercel dev`).
+      // Don't dead-end the customer: offer the UPI QR and Pay at cafe right here.
       console.error("[payments] Supabase is not configured (VITE_SUPABASE_URL); online payments are disabled.");
+      setPaymentOption("upi");
+      setShowUpiQr(true);
+      toast.error("Online payment isn't set up on this site yet. Scan the UPI QR, or choose Pay at cafe.");
       return;
     }
 
@@ -828,8 +823,8 @@ function ReservePage() {
           status: "awaiting",
           kind: "full",
           method: checkoutMethod,
-          duePaise: totalWithDeposit * 100, // replaced by the server amount once the order is created
-          totalPaise: totalWithDeposit * 100,
+          duePaise: Math.round(totalWithDeposit * 100), // replaced by the server amount once the order is created
+          totalPaise: Math.round(totalWithDeposit * 100),
           expiresAt: null,
           scheduledAt: null,
         });
@@ -906,21 +901,47 @@ function ReservePage() {
         }).catch((err) => console.error("Failed to send notification:", err));
       } else if (outcome.status === "failed") {
         setPreorderPay((prev) => prev && { ...prev, error: outcome.message });
-        toast.error(outcome.message);
+        reportPaymentFailed(bookingCode, phone.trim(), outcome.message);
+        toast.error(`Payment failed. ${outcome.message.replace(/\.?$/, ".")} You can retry, scan the UPI QR or pay at the cafe.`);
       } else {
         toast.info(
           preorderPay?.kind === "full"
-            ? "Payment not completed. Your order is saved — you can retry below or from My Bookings."
-            : `Payment not completed. Your order is held for ${PAYMENT_WINDOW_MINUTES} minutes — you can retry below.`
+            ? "Payment cancelled. Your order is saved — retry below, scan the UPI QR or pay at the cafe."
+            : `Payment cancelled. Your order is held for ${PAYMENT_WINDOW_MINUTES} minutes — retry below, scan the UPI QR or pay at the cafe.`
         );
       }
     } catch (err) {
       const expired = err instanceof PaymentApiError && err.code === "ORDER_EXPIRED";
       const message = err instanceof Error ? err.message : "Could not start the payment.";
       setPreorderPay((prev) => prev && { ...prev, status: expired ? "expired" : prev.status, error: message });
-      toast.error(message);
+      if (!expired) reportPaymentFailed(bookingCode, phone.trim(), message);
+      toast.error(expired ? message : `${message} You can scan the UPI QR or pay at the cafe instead.`);
     } finally {
       setPayingNow(false);
+    }
+  };
+
+  /** Online payment didn't work: keep the order and pay by cash or card at the cafe. */
+  const handlePayAtCafe = async () => {
+    if (!code || switchingToCafe) return;
+    setSwitchingToCafe(true);
+    try {
+      try {
+        await chooseCafePayment(code, phone.trim());
+      } catch (err) {
+        // Without the /api server only orders that aren't held for a deposit can be switched
+        const noServer = err instanceof PaymentApiError && (err.code === "NO_SERVER" || err.code === "NETWORK");
+        if (!noServer || preorderPay?.kind === "deposit") throw err;
+        await updateBookingPaymentStatus({ code, status: "pending_cash", method: "pay_on_arrival" });
+      }
+      setPaymentOption("cash");
+      setShowUpiQr(false);
+      setPreorderPay(null);
+      toast.success("Order placed — please pay by cash or card at the cafe.");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "We couldn't switch your payment. Please ask our staff.");
+    } finally {
+      setSwitchingToCafe(false);
     }
   };
 
@@ -1181,6 +1202,16 @@ function ReservePage() {
                     />
                   )
                 )}
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={handlePayAtCafe}
+                  disabled={payingNow || switchingToCafe}
+                  className="w-full"
+                >
+                  <Banknote className="size-4 mr-2" />
+                  {switchingToCafe ? "Switching…" : "Pay at cafe instead (cash or card)"}
+                </Button>
               </>
             )}
 
@@ -1258,13 +1289,13 @@ function ReservePage() {
             </div>
             <p className="text-xs text-muted-foreground leading-relaxed">
               {orderType === "DINE_IN" && (
-                <>Your table is reserved and dishes are queued. Settle your bill of <strong>₹{totalWithDeposit}</strong> in cash at the counter when you visit.</>
+                <>Your table is reserved and dishes are queued. Settle your bill of <strong>{formatPaise(Math.round(totalWithDeposit * 100))}</strong> by cash or card at the counter when you visit.</>
               )}
               {orderType === "TAKEAWAY" && (
-                <>Your order is queued. Pay <strong>₹{totalWithDeposit}</strong> in cash at the counter when you collect it.</>
+                <>Your order is queued. Pay <strong>{formatPaise(Math.round(totalWithDeposit * 100))}</strong> by cash or card at the counter when you collect it.</>
               )}
               {orderType === "DELIVERY" && (
-                <>Your order is queued. Please keep <strong>₹{totalWithDeposit}</strong> ready to pay the rider on delivery.</>
+                <>Your order is queued. Please keep <strong>{formatPaise(Math.round(totalWithDeposit * 100))}</strong> ready to pay the rider on delivery.</>
               )}
             </p>
           </div>
@@ -1370,7 +1401,7 @@ function ReservePage() {
       </div>
 
       {/* TWO DISTINCT BLOCKS: Reservation Form Steps & Summary Card */}
-      <div className="mt-10 flex flex-col lg:flex-row items-start gap-8">
+      <div className="mt-10 flex flex-col lg:flex-row items-start lg:items-stretch gap-8">
         <div className="w-full flex-1 min-w-0 space-y-10">
           {/* STEP 1: ORDER TYPE SELECTOR */}
           <section className="rounded-3xl border border-border/80 bg-card/60 p-6 shadow-xs backdrop-blur-sm">
@@ -2048,7 +2079,9 @@ function ReservePage() {
                   ))}
                 </div>
 
-                <div className="grid gap-3">
+                {/* grid-cols-1 caps the column at the section width; without it long one-line
+                    descriptions stretch the rows out over the Order Summary and Find Us */}
+                <div className="grid grid-cols-1 gap-3">
                   {menuItems
                     .filter((m) => m.category === activeCategoryTab)
                     .map((item) => {
@@ -2298,7 +2331,8 @@ function ReservePage() {
 
         {/* SIDEBAR BOOKING SUMMARY */}
         <aside className="w-full lg:w-[380px] lg:shrink-0">
-          <div className="rounded-2xl border border-border bg-card p-6 shadow-warm">
+          {/* Sticky on desktop; kept short enough to stay clear of the floating chat button */}
+          <div className="rounded-2xl border border-border bg-card p-6 shadow-warm lg:sticky lg:top-20 lg:max-h-[calc(100vh-11rem)] lg:overflow-y-auto">
             <div className="flex items-center justify-between pb-3 border-b border-border/70">
               <h3 className="text-xl font-display text-foreground">Order Summary</h3>
               <Badge className={`px-2.5 py-0.5 text-xs font-semibold flex items-center gap-1 shadow-xs ${getOrderTypeDetails(orderType).badgeClass}`}>
@@ -2454,6 +2488,19 @@ function ReservePage() {
                   <span>₹{foodTotal}</span>
                 </div>
 
+                {foodTotal > 0 && (
+                  <>
+                    <div className="flex justify-between text-muted-foreground pt-1">
+                      <span>CGST ({TAX_RATES.cgst * 100}%)</span>
+                      <span className="font-medium text-foreground">₹{cgst.toFixed(2)}</span>
+                    </div>
+                    <div className="flex justify-between text-muted-foreground pt-1">
+                      <span>SGST ({TAX_RATES.sgst * 100}%)</span>
+                      <span className="font-medium text-foreground">₹{sgst.toFixed(2)}</span>
+                    </div>
+                  </>
+                )}
+
                 {packagingCharge > 0 && (
                   <div className="flex justify-between text-muted-foreground pt-1">
                     <span className="flex items-center gap-1">
@@ -2498,6 +2545,10 @@ function ReservePage() {
                         <dd className="font-medium text-foreground">₹{foodTotal}</dd>
                       </div>
                       <div className="flex justify-between">
+                        <dt className="text-muted-foreground">CGST + SGST ({(TAX_RATES.cgst + TAX_RATES.sgst) * 100}%)</dt>
+                        <dd className="font-medium text-foreground">₹{taxAmount.toFixed(2)}</dd>
+                      </div>
+                      <div className="flex justify-between">
                         <dt className="text-muted-foreground">Parcel Charge (₹{packagingCharge})</dt>
                         <dd className="font-medium text-foreground">₹{packagingCharge}</dd>
                       </div>
@@ -2536,14 +2587,9 @@ function ReservePage() {
               </div>
             )}
 
-            {/* Payment options — UPI (recommended) → Cards → Netbanking; cash only for table bookings without food */}
+            {/* Payment options — UPI (recommended) → Cards → Netbanking → Pay at cafe */}
             <div className="mt-5 space-y-2.5 border-t border-border/70 pt-4">
               <p id="payment-method-label" className="text-xs font-semibold text-foreground">Payment Method</p>
-              {hasFoodPreOrder && (
-                <p className="text-[11px] text-muted-foreground">
-                  Food pre-orders are paid online — cash isn't available.
-                </p>
-              )}
               <div role="radiogroup" aria-labelledby="payment-method-label" className="grid gap-2">
                 {paymentOptions.map((id) => {
                   const o = PAYMENT_OPTIONS[id];
@@ -2631,7 +2677,7 @@ function ReservePage() {
             <div className="mt-4 pt-3 border-t border-border/70 flex justify-between items-baseline">
               <span className="font-semibold text-sm">{prepayActive ? "Due Now" : "Total Due"}</span>
               <span className="font-bold text-accent text-xl">
-                {prepayActive ? formatPaise(estDuePaise) : `₹${totalWithDeposit}`}
+                {prepayActive ? formatPaise(estDuePaise) : formatPaise(Math.round(totalWithDeposit * 100))}
               </span>
             </div>
 
@@ -2661,7 +2707,7 @@ function ReservePage() {
                 : prepayActive
                 ? `Pay ${formatPaise(estDuePaise)} & Place Order`
                 : isOnlinePaymentMethod(paymentMethod)
-                ? `Pay ₹${totalWithDeposit} with ${PAYMENT_OPTIONS[paymentOption].label} & Place Order`
+                ? `Pay ${formatPaise(Math.round(totalWithDeposit * 100))} with ${PAYMENT_OPTIONS[paymentOption].label} & Place Order`
                 : orderType === "DINE_IN"
                 ? "Confirm Table & Place Order"
                 : orderType === "TAKEAWAY"
@@ -2670,10 +2716,11 @@ function ReservePage() {
             </Button>
           </div>
 
-          <div className="mt-6">
-            <FindUsCard />
-          </div>
         </aside>
+      </div>
+
+      <div className="mt-8">
+        <FindUsCard />
       </div>
     </form>
 

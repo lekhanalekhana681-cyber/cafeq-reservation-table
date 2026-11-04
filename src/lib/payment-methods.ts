@@ -1,11 +1,9 @@
 /**
  * Payment method rules for checkout.
- * - Options shown, top to bottom: UPI (recommended) → Cards → Netbanking, all through Razorpay.
- *   Table bookings without food also keep Pay at Counter (cash).
- * - Food pre-order in the cart → never cash.
+ * - Options shown, top to bottom: UPI (recommended) → Cards → Netbanking, all through Razorpay,
+ *   then Pay at cafe (cash or card), always there so an order never fails completely.
  * - UPI QR (upi_prepay) is the backup under UPI when the gateway fails; staff verify it.
- * Enforced again in the database (check_payment_method_rules, 20261104000000_upi_qr_backup.sql)
- * and in /api/payments/create-order, so the browser can't bypass it.
+ * Enforced again in the database (check_payment_method_rules, 20261107000000_pay_at_cafe_and_gst.sql).
  */
 
 export type PaymentMethodId = "online_razorpay" | "upi_razorpay" | "upi_prepay" | "pay_on_arrival";
@@ -47,32 +45,23 @@ export const PAYMENT_METHODS: Record<PaymentMethodId, PaymentMethodInfo> = {
   },
   pay_on_arrival: {
     id: "pay_on_arrival",
-    label: "Pay at Counter (Cash)",
-    description: "Order confirmed for counter payment",
+    label: "Pay at cafe",
+    description: "Cash or card at the counter",
     online: false,
     cash: true,
   },
 };
 
-const PREORDER_METHODS: PaymentMethodId[] = ["upi_razorpay", "online_razorpay", "upi_prepay"];
-const TABLE_ONLY_METHODS: PaymentMethodId[] = ["upi_razorpay", "online_razorpay", "upi_prepay", "pay_on_arrival"];
+const ALLOWED_METHODS: PaymentMethodId[] = ["upi_razorpay", "online_razorpay", "upi_prepay", "pay_on_arrival"];
 
-/** The payment methods this order may be stored with. */
-export function getAllowedPaymentMethods(hasPreOrder: boolean): PaymentMethodId[] {
-  return hasPreOrder ? PREORDER_METHODS : TABLE_ONLY_METHODS;
+/** The payment methods an order may be stored with. */
+export function getAllowedPaymentMethods(): PaymentMethodId[] {
+  return ALLOWED_METHODS;
 }
 
 /** True when the order has food to prepare ahead (mirrors public.order_has_preorder). */
 export function orderHasPreOrder(items: Array<{ fulfillment?: string | null }>): boolean {
   return items.some((i) => (i.fulfillment ?? "pre_ordered") === "pre_ordered");
-}
-
-/**
- * The method to keep after the cart changes: the current one if still allowed,
- * otherwise Razorpay (e.g. cash was selected and the guest added food).
- */
-export function resolvePaymentMethod(current: PaymentMethodId, hasPreOrder: boolean): PaymentMethodId {
-  return getAllowedPaymentMethods(hasPreOrder).includes(current) ? current : "online_razorpay";
 }
 
 export const isOnlinePaymentMethod = (id: string): boolean => PAYMENT_METHODS[id as PaymentMethodId]?.online === true;
@@ -121,19 +110,14 @@ export const PAYMENT_OPTIONS: Record<PaymentOptionId, PaymentOptionInfo> = {
   },
   cash: {
     id: "cash",
-    label: "Pay at Counter (Cash)",
-    description: "Order confirmed for counter payment",
+    label: "Pay at cafe",
+    description: "Cash or card at the counter",
     method: "pay_on_arrival",
     cash: true,
   },
 };
 
-/** Options in display order: UPI first (recommended), then Cards, then Netbanking; cash for table-only. */
-export function getPaymentOptions(hasPreOrder: boolean): PaymentOptionId[] {
-  return hasPreOrder ? ["upi", "card", "netbanking"] : ["upi", "card", "netbanking", "cash"];
-}
-
-/** Keeps the current option if still offered, otherwise UPI (the recommended one). */
-export function resolvePaymentOption(current: PaymentOptionId, hasPreOrder: boolean): PaymentOptionId {
-  return getPaymentOptions(hasPreOrder).includes(current) ? current : "upi";
+/** Options in display order: UPI first (recommended), then Cards, Netbanking and Pay at cafe. */
+export function getPaymentOptions(): PaymentOptionId[] {
+  return ["upi", "card", "netbanking", "cash"];
 }

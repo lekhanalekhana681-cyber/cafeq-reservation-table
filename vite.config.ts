@@ -15,6 +15,9 @@ export default defineConfig({
     tailwindcss(),
     tsconfigPaths(),
   ],
+  // Browsers have no `process`: code reading process.env?.[...] must get undefined, not crash the page.
+  // An empty object, so no server environment value can reach the bundle.
+  define: { "process.env": {} },
   // VITE_* plus the two public UPI values (CAFE_UPI_ID, CAFE_PAYEE_NAME) reach the browser
   envPrefix: ["VITE_", "CAFE_UPI_ID", "CAFE_PAYEE_NAME"],
   server: {

@@ -63,8 +63,6 @@ async function runTests() {
   const {
     getAllowedPaymentMethods,
     getPaymentOptions,
-    resolvePaymentOption,
-    resolvePaymentMethod,
     orderHasPreOrder,
     PAYMENT_METHODS,
     PAYMENT_OPTIONS,
@@ -77,32 +75,22 @@ async function runTests() {
   // --------------------------------------------------------------------------
   console.log("Suite 1: Allowed Methods");
 
-  const pre = getPaymentOptions(true);
-  assert(pre.join(",") === "upi,card,netbanking", `Food pre-order → UPI, Cards, Netbanking in that order (${pre.join(", ")})`);
-  assert(!pre.some((o) => PAYMENT_OPTIONS[o].cash), "Food pre-order → no cash option");
-  assert(!getAllowedPaymentMethods(true).includes("pay_on_arrival"), "Food pre-order → cash can't be stored either");
-  assert(PAYMENT_OPTIONS.upi.recommended === true && pre[0] === "upi", "UPI is first and marked Recommended");
+  const options = getPaymentOptions();
+  assert(options.join(",") === "upi,card,netbanking,cash", `UPI, Cards, Netbanking, Pay at cafe in that order (${options.join(", ")})`);
+  assert(PAYMENT_OPTIONS.cash.label === "Pay at cafe" && PAYMENT_OPTIONS.cash.description.includes("card"), "Fallback is labelled Pay at cafe (cash or card)");
+  assert(getAllowedPaymentMethods().includes("pay_on_arrival"), "Pay at cafe can be stored on any order");
+  assert(PAYMENT_OPTIONS.upi.recommended === true && options[0] === "upi", "UPI is first and marked Recommended");
   assert(
     PAYMENT_OPTIONS.upi.checkoutMethod === "upi" && PAYMENT_OPTIONS.card.checkoutMethod === "card" && PAYMENT_OPTIONS.netbanking.checkoutMethod === "netbanking",
     "Each option opens Razorpay on just that method"
   );
-  assert(pre.every((o) => isOnlinePaymentMethod(PAYMENT_OPTIONS[o].method)), "All three go through the verified online flow");
-  const tableOnly = getPaymentOptions(false);
-  assert(tableOnly.join(",") === "upi,card,netbanking,cash", "Table booking only → same three + Pay at Counter (cash)");
-  assert(getAllowedPaymentMethods(true).includes("upi_prepay"), "UPI QR backup is allowed for pre-orders (it isn't cash)");
+  assert(["upi", "card", "netbanking"].every((o) => isOnlinePaymentMethod(PAYMENT_OPTIONS[o as "upi"].method)), "All three online options go through the verified online flow");
+  assert(getAllowedPaymentMethods().includes("upi_prepay"), "UPI QR backup is allowed");
   assert(PAYMENT_METHODS.upi_prepay.online === false, "UPI QR isn't treated as a verified online payment");
 
   assert(orderHasPreOrder([{ fulfillment: "pre_ordered" }]), "Item ready on arrival → pre-order");
   assert(!orderHasPreOrder([{ fulfillment: "at_table" }]), "Items ordered at the table only → not a pre-order");
   assert(!orderHasPreOrder([]), "No items → not a pre-order");
-
-  // --------------------------------------------------------------------------
-  console.log("\nSuite 2: Cart Changes");
-
-  assert(resolvePaymentOption("cash", true) === "upi", "Cash selected, food added → auto-switch to UPI");
-  assert(resolvePaymentOption("netbanking", true) === "netbanking", "Netbanking stays selected with food");
-  assert(resolvePaymentOption("cash", false) === "cash", "Food removed → cash allowed again, selection kept");
-  assert(resolvePaymentMethod("pay_on_arrival", true) === "online_razorpay", "Stored method: cash on a pre-order → Razorpay");
 
   // --------------------------------------------------------------------------
   console.log("\nSuite 3: createBooking Enforcement");
@@ -121,16 +109,12 @@ async function runTests() {
   };
   const food = [{ id: "cafe-latte", name: "Cafe Latte", qty: 2, price: 180, prepTimeMinutes: 4, fulfillment: "pre_ordered" }];
 
-  let message = "";
-  try {
-    await createBooking({ data: { ...base, code: "CQ-PM-01", items: food, paymentMethod: "pay_on_arrival" } as any });
-  } catch (err) {
-    message = err instanceof Error ? err.message : String(err);
-  }
-  assert(/Cash payment is not available for food pre-orders/.test(message), `Cash + food pre-order → refused: "${message}"`);
+  await createBooking({ data: { ...base, code: "CQ-PM-01", items: food, paymentMethod: "pay_on_arrival" } as any });
+  let b = (await getAllBookings()).find((x) => x.code === "CQ-PM-01");
+  assert(b?.paymentMethod === "pay_on_arrival", "Food pre-order with Pay at cafe is accepted");
 
   await createBooking({ data: { ...base, code: "CQ-PM-02", items: food } as any });
-  let b = (await getAllBookings()).find((x) => x.code === "CQ-PM-02");
+  b = (await getAllBookings()).find((x) => x.code === "CQ-PM-02");
   assert(b?.paymentMethod === "online_razorpay" && b?.paymentStatus === "pending_online", "Food pre-order without a method → Razorpay, pending online payment");
 
   await createBooking({ data: { ...base, code: "CQ-PM-03", items: food, paymentMethod: "upi_razorpay" } as any });
@@ -144,13 +128,14 @@ async function runTests() {
   // --------------------------------------------------------------------------
   console.log("\nSuite 4: UPI QR Backup Link");
 
-  assert(CAFE_UPI_ID === "7349540534@axl", "Cafe UPI ID is 7349540534@axl");
-  const link = buildUpiPaymentLink({ amount: 360, reference: "CQ-AB12" });
+  const upi = { upiId: "7349540534@axl", payeeName: "LEKHANA B S" };
+  assert(CAFE_UPI_ID === "", "No UPI ID hard-coded in the frontend: it comes only from .env");
+  const link = buildUpiPaymentLink({ amount: 360, reference: "CQ-AB12", ...upi });
   assert(
     link === "upi://pay?pa=7349540534@axl&pn=LEKHANA%20B%20S&am=360.00&cu=INR&tn=CQ-AB12",
     `upi://pay link with amount and reservation ID: ${link}`
   );
-  assert(buildUpiPaymentLink({ amount: 504.5, reference: "CQ-AB12" }).includes("&am=504.50&"), "Amount follows the order total (₹504.50)");
+  assert(buildUpiPaymentLink({ amount: 504.5, reference: "CQ-AB12", ...upi }).includes("&am=504.50&"), "Amount follows the order total (₹504.50)");
   assert(
     buildUpiPaymentLink({ amount: 100, reference: "CQ 1&x", upiId: "real@okhdfc", payeeName: "Brew & Co" }) ===
       "upi://pay?pa=real@okhdfc&pn=Brew%20%26%20Co&am=100.00&cu=INR&tn=CQ%201%26x",
@@ -158,9 +143,15 @@ async function runTests() {
   );
   const parcel = getOrderCharges("TAKEAWAY", null).packagingCharge;
   assert(
-    buildUpiPaymentLink({ amount: 120 + parcel, reference: "CQ-TK01" }).includes("&am=150.00&cu=INR&tn=CQ-TK01"),
+    buildUpiPaymentLink({ amount: 120 + parcel, reference: "CQ-TK01", ...upi }).includes("&am=150.00&cu=INR&tn=CQ-TK01"),
     "Takeaway QR amount includes the ₹30 parcel charge (₹120 + ₹30 = ₹150)"
   );
+  const { computeOrderTaxes } = await import("../src/config/charges");
+  const { computeBillTotals } = await import("../src/lib/receipt.service");
+  const gst = computeOrderTaxes(125);
+  assert(gst.cgst === 3.13 && gst.sgst === 3.13 && gst.taxAmount === 6.26, "CGST 2.5% + SGST 2.5% on ₹125 → ₹3.13 + ₹3.13");
+  const bill = computeBillTotals([{ price: 125, qty: 1 }]);
+  assert(bill.cgst === gst.cgst && bill.sgst === gst.sgst && bill.grandTotal === 131.26, "Checkout and bill use the same tax calculation (₹131.26)");
   assert(isValidUtr("412345678901") && isValidUtr("4123 4567 8901"), "12-digit UTR accepted (spaces ignored)");
   assert(!isValidUtr("") && !isValidUtr("12345") && !isValidUtr("4123456789012") && !isValidUtr("41234567890a"), "Missing / short / long / non-numeric UTR refused");
 
