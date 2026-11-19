@@ -41,6 +41,7 @@ import {
   normalizeOrderType,
   getOrderTypeDetails,
   getOrderStatusLabel,
+  ORDER_TYPE_VALUES,
 } from "@/lib/order-types";
 import {
   averagePrepMinutes,
@@ -712,9 +713,10 @@ function KitchenDashboardPage() {
               {(
                 [
                   { id: "All", label: "All Types" },
-                  { id: "dine_in", label: "Dine-in" },
-                  { id: "takeaway", label: "Takeaway" },
-                  { id: "delivery", label: "Delivery" },
+                  ...ORDER_TYPE_VALUES.map((v) => ({
+                    id: v.toLowerCase(),
+                    label: v === "DINE_IN" ? "Dine‑in" : v.charAt(0) + v.slice(1).toLowerCase(),
+                  })),
                 ] as const
               ).map((type) => (
                 <button
